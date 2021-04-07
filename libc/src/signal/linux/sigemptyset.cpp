@@ -1,4 +1,4 @@
-//===--------------- Linux implementation of sigemptyset ------------------===//
+//===-- Linux implementation of sigemptyset -------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -15,7 +15,7 @@
 
 namespace __llvm_libc {
 
-int LLVM_LIBC_ENTRYPOINT(sigemptyset)(sigset_t *set) {
+LLVM_LIBC_FUNCTION(int, sigemptyset, (sigset_t * set)) {
   if (!set) {
     llvmlibc_errno = EINVAL;
     return -1;

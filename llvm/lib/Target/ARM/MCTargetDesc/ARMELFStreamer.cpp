@@ -177,7 +177,8 @@ void ARMTargetAsmStreamer::switchVendor(StringRef Vendor) {}
 void ARMTargetAsmStreamer::emitAttribute(unsigned Attribute, unsigned Value) {
   OS << "\t.eabi_attribute\t" << Attribute << ", " << Twine(Value);
   if (IsVerboseAsm) {
-    StringRef Name = ARMBuildAttrs::AttrTypeAsString(Attribute);
+    StringRef Name =
+        ELFAttrs::attrTypeAsString(Attribute, ARMBuildAttrs::ARMAttributeTags);
     if (!Name.empty())
       OS << "\t@ " << Name;
   }
@@ -193,7 +194,8 @@ void ARMTargetAsmStreamer::emitTextAttribute(unsigned Attribute,
   default:
     OS << "\t.eabi_attribute\t" << Attribute << ", \"" << String << "\"";
     if (IsVerboseAsm) {
-      StringRef Name = ARMBuildAttrs::AttrTypeAsString(Attribute);
+      StringRef Name = ELFAttrs::attrTypeAsString(
+          Attribute, ARMBuildAttrs::ARMAttributeTags);
       if (!Name.empty())
         OS << "\t@ " << Name;
     }
@@ -212,7 +214,9 @@ void ARMTargetAsmStreamer::emitIntTextAttribute(unsigned Attribute,
     if (!StringValue.empty())
       OS << ", \"" << StringValue << "\"";
     if (IsVerboseAsm)
-      OS << "\t@ " << ARMBuildAttrs::AttrTypeAsString(Attribute);
+      OS << "\t@ "
+         << ELFAttrs::attrTypeAsString(Attribute,
+                                       ARMBuildAttrs::ARMAttributeTags);
     break;
   }
   OS << "\n";
@@ -440,7 +444,7 @@ public:
 
   ~ARMELFStreamer() override = default;
 
-  void FinishImpl() override;
+  void finishImpl() override;
 
   // ARM exception handling directives
   void emitFnStart();
@@ -460,9 +464,9 @@ public:
     MCObjectStreamer::emitFill(NumBytes, FillValue, Loc);
   }
 
-  void ChangeSection(MCSection *Section, const MCExpr *Subsection) override {
+  void changeSection(MCSection *Section, const MCExpr *Subsection) override {
     LastMappingSymbols[getCurrentSection().first] = std::move(LastEMSInfo);
-    MCELFStreamer::ChangeSection(Section, Subsection);
+    MCELFStreamer::changeSection(Section, Subsection);
     auto LastMappingSymbol = LastMappingSymbols.find(Section);
     if (LastMappingSymbol != LastMappingSymbols.end()) {
       LastEMSInfo = std::move(LastMappingSymbol->second);
@@ -575,6 +579,28 @@ public:
     }
   }
 
+  /// If a label is defined before the .type directive sets the label's type
+  /// then the label can't be recorded as thumb function when the label is
+  /// defined. We override emitSymbolAttribute() which is called as part of the
+  /// parsing of .type so that if the symbol has already been defined we can
+  /// record the label as Thumb. FIXME: there is a corner case where the state
+  /// is changed in between the label definition and the .type directive, this
+  /// is not expected to occur in practice and handling it would require the
+  /// backend to track IsThumb for every label.
+  bool emitSymbolAttribute(MCSymbol *Symbol, MCSymbolAttr Attribute) override {
+    bool Val = MCELFStreamer::emitSymbolAttribute(Symbol, Attribute);
+
+    if (!IsThumb)
+      return Val;
+
+    unsigned Type = cast<MCSymbolELF>(Symbol)->getType();
+    if ((Type == ELF::STT_FUNC || Type == ELF::STT_GNU_IFUNC) &&
+        Symbol->isDefined())
+      getAssembler().setIsThumbFunc(Symbol);
+
+    return Val;
+  };
+
 private:
   enum ElfMappingSymbol {
     EMS_None,
@@ -640,7 +666,6 @@ private:
 
     Symbol->setType(ELF::STT_NOTYPE);
     Symbol->setBinding(ELF::STB_LOCAL);
-    Symbol->setExternal(false);
   }
 
   void EmitMappingSymbol(StringRef Name, SMLoc Loc, MCFragment *F,
@@ -650,7 +675,6 @@ private:
     emitLabelAtPos(Symbol, Loc, F, Offset);
     Symbol->setType(ELF::STT_NOTYPE);
     Symbol->setBinding(ELF::STB_LOCAL);
-    Symbol->setExternal(false);
   }
 
   void emitThumbFunc(MCSymbol *Func) override {
@@ -1159,12 +1183,12 @@ void ARMTargetELFStreamer::emitInst(uint32_t Inst, char Suffix) {
 
 void ARMTargetELFStreamer::reset() { AttributeSection = nullptr; }
 
-void ARMELFStreamer::FinishImpl() {
+void ARMELFStreamer::finishImpl() {
   MCTargetStreamer &TS = *getTargetStreamer();
   ARMTargetStreamer &ATS = static_cast<ARMTargetStreamer &>(TS);
   ATS.finishAttributeSection();
 
-  MCELFStreamer::FinishImpl();
+  MCELFStreamer::finishImpl();
 }
 
 void ARMELFStreamer::reset() {
@@ -1190,7 +1214,7 @@ inline void ARMELFStreamer::SwitchToEHSection(StringRef Prefix,
     static_cast<const MCSectionELF &>(Fn.getSection());
 
   // Create the name for new section
-  StringRef FnSecName(FnSection.getSectionName());
+  StringRef FnSecName(FnSection.getName());
   SmallString<128> EHSecName(Prefix);
   if (FnSecName != ".text") {
     EHSecName += FnSecName;
@@ -1201,7 +1225,8 @@ inline void ARMELFStreamer::SwitchToEHSection(StringRef Prefix,
   if (Group)
     Flags |= ELF::SHF_GROUP;
   MCSectionELF *EHSection = getContext().getELFSection(
-      EHSecName, Type, Flags, 0, Group, FnSection.getUniqueID(),
+      EHSecName, Type, Flags, 0, Group, /*IsComdat=*/true,
+      FnSection.getUniqueID(),
       static_cast<const MCSymbolELF *>(FnSection.getBeginSymbol()));
 
   assert(EHSection && "Failed to get the required EH section");

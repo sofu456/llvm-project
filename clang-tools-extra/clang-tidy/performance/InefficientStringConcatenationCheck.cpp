@@ -24,7 +24,7 @@ void InefficientStringConcatenationCheck::storeOptions(
 InefficientStringConcatenationCheck::InefficientStringConcatenationCheck(
     StringRef Name, ClangTidyContext *Context)
     : ClangTidyCheck(Name, Context),
-      StrictMode(Options.getLocalOrGlobal("StrictMode", 0)) {}
+      StrictMode(Options.getLocalOrGlobal("StrictMode", false)) {}
 
 void InefficientStringConcatenationCheck::registerMatchers(
     MatchFinder *Finder) {
@@ -69,7 +69,7 @@ void InefficientStringConcatenationCheck::check(
   const auto *LhsStr = Result.Nodes.getNodeAs<DeclRefExpr>("lhsStr");
   const auto *PlusOperator =
       Result.Nodes.getNodeAs<CXXOperatorCallExpr>("plusOperator");
-  const auto DiagMsg =
+  const char *DiagMsg =
       "string concatenation results in allocation of unnecessary temporary "
       "strings; consider using 'operator+=' or 'string::append()' instead";
 

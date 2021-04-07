@@ -390,7 +390,7 @@ bool HexagonHardwareLoops::runOnMachineFunction(MachineFunction &MF) {
   TRI = HST.getRegisterInfo();
 
   for (auto &L : *MLI)
-    if (!L->getParentLoop()) {
+    if (L->isOutermost()) {
       bool L0Used = false;
       bool L1Used = false;
       Changed |= convertToHardwareLoop(L, L0Used, L1Used);
@@ -467,7 +467,7 @@ bool HexagonHardwareLoops::findInductionRegister(MachineLoop *L,
   if (!PredI->isCompare())
     return false;
 
-  unsigned CmpReg1 = 0, CmpReg2 = 0;
+  Register CmpReg1, CmpReg2;
   int CmpImm = 0, CmpMask = 0;
   bool CmpAnalyzed =
       TII->analyzeCompare(*PredI, CmpReg1, CmpReg2, CmpMask, CmpImm);
@@ -651,7 +651,7 @@ CountValue *HexagonHardwareLoops::getLoopTripCount(MachineLoop *L,
   MachineInstr *CondI = MRI->getVRegDef(PredReg);
   unsigned CondOpc = CondI->getOpcode();
 
-  unsigned CmpReg1 = 0, CmpReg2 = 0;
+  Register CmpReg1, CmpReg2;
   int Mask = 0, ImmValue = 0;
   bool AnalyzedCmp =
       TII->analyzeCompare(*CondI, CmpReg1, CmpReg2, Mask, ImmValue);
@@ -1370,10 +1370,8 @@ bool HexagonHardwareLoops::isLoopFeeder(MachineLoop *L, MachineBasicBlock *A,
     LLVM_DEBUG(dbgs() << "\nhw_loop head, "
                       << printMBBReference(**L->block_begin()));
     // Ignore all BBs that form Loop.
-    for (MachineBasicBlock *MBB : L->getBlocks()) {
-      if (A == MBB)
-        return false;
-    }
+    if (llvm::is_contained(L->getBlocks(), A))
+      return false;
     MachineInstr *Def = MRI->getVRegDef(MO->getReg());
     LoopFeederPhi.insert(std::make_pair(MO->getReg(), Def));
     return true;
@@ -1432,7 +1430,7 @@ bool HexagonHardwareLoops::loopCountMayWrapOrUnderFlow(
   Register Reg = InitVal->getReg();
 
   // We don't know the value of a physical register.
-  if (!Register::isVirtualRegister(Reg))
+  if (!Reg.isVirtual())
     return true;
 
   MachineInstr *Def = MRI->getVRegDef(Reg);
@@ -1455,7 +1453,7 @@ bool HexagonHardwareLoops::loopCountMayWrapOrUnderFlow(
   for (MachineRegisterInfo::use_instr_nodbg_iterator I = MRI->use_instr_nodbg_begin(Reg),
          E = MRI->use_instr_nodbg_end(); I != E; ++I) {
     MachineInstr *MI = &*I;
-    unsigned CmpReg1 = 0, CmpReg2 = 0;
+    Register CmpReg1, CmpReg2;
     int CmpMask = 0, CmpValue = 0;
 
     if (!TII->analyzeCompare(*MI, CmpReg1, CmpReg2, CmpMask, CmpValue))
@@ -1510,7 +1508,7 @@ bool HexagonHardwareLoops::checkForImmediate(const MachineOperand &MO,
   int64_t TV;
 
   Register R = MO.getReg();
-  if (!Register::isVirtualRegister(R))
+  if (!R.isVirtual())
     return false;
   MachineInstr *DI = MRI->getVRegDef(R);
   unsigned DOpc = DI->getOpcode();

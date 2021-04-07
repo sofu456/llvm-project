@@ -1,4 +1,4 @@
-//===----------------------- Unittests for abort --------------------------===//
+//===-- Unittests for abort -----------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -11,8 +11,8 @@
 #include "src/stdlib/abort.h"
 #include "utils/UnitTest/Test.h"
 
-TEST(Stdlib, abort) {
+TEST(LlvmLibcStdlib, abort) {
   // -1 matches against any signal, which is necessary for now until
   // __llvm_libc::abort() unblocks SIGABRT.
-  EXPECT_DEATH([] { __llvm_libc::abort(); }, -1);
+  EXPECT_DEATH([] { __llvm_libc::abort(); }, WITH_SIGNAL(-1));
 }

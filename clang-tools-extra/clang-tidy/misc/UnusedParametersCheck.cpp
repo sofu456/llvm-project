@@ -8,10 +8,12 @@
 
 #include "UnusedParametersCheck.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ASTLambda.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Lex/Lexer.h"
 #include "llvm/ADT/STLExtras.h"
+#include <unordered_map>
 #include <unordered_set>
 
 using namespace clang::ast_matchers;
@@ -122,7 +124,7 @@ UnusedParametersCheck::~UnusedParametersCheck() = default;
 UnusedParametersCheck::UnusedParametersCheck(StringRef Name,
                                              ClangTidyContext *Context)
     : ClangTidyCheck(Name, Context),
-      StrictMode(Options.getLocalOrGlobal("StrictMode", 0) != 0) {}
+      StrictMode(Options.getLocalOrGlobal("StrictMode", false)) {}
 
 void UnusedParametersCheck::storeOptions(ClangTidyOptions::OptionMap &Opts) {
   Options.store(Opts, "StrictMode", StrictMode);
@@ -141,7 +143,8 @@ void UnusedParametersCheck::warnOnUnusedParameter(
   // Cannot remove parameter for non-local functions.
   if (Function->isExternallyVisible() ||
       !Result.SourceManager->isInMainFile(Function->getLocation()) ||
-      !Indexer->getOtherRefs(Function).empty() || isOverrideMethod(Function)) {
+      !Indexer->getOtherRefs(Function).empty() || isOverrideMethod(Function) ||
+      isLambdaCallOperator(Function)) {
 
     // It is illegal to omit parameter name here in C code, so early-out.
     if (!Result.Context->getLangOpts().CPlusPlus)
@@ -174,8 +177,8 @@ void UnusedParametersCheck::check(const MatchFinder::MatchResult &Result) {
   if (const auto *Method = dyn_cast<CXXMethodDecl>(Function))
     if (Method->isLambdaStaticInvoker())
       return;
-  for (unsigned i = 0, e = Function->getNumParams(); i != e; ++i) {
-    const auto *Param = Function->getParamDecl(i);
+  for (unsigned I = 0, E = Function->getNumParams(); I != E; ++I) {
+    const auto *Param = Function->getParamDecl(I);
     if (Param->isUsed() || Param->isReferenced() || !Param->getDeclName() ||
         Param->hasAttr<UnusedAttr>())
       continue;
@@ -187,7 +190,7 @@ void UnusedParametersCheck::check(const MatchFinder::MatchResult &Result) {
          Function->getBody()->child_end()) ||
         (isa<CXXConstructorDecl>(Function) &&
          cast<CXXConstructorDecl>(Function)->getNumCtorInitializers() > 0))
-      warnOnUnusedParameter(Result, Function, i);
+      warnOnUnusedParameter(Result, Function, I);
   }
 }
 

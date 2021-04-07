@@ -6,24 +6,21 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "PassDetail.h"
 #include "mlir/Dialect/Quant/Passes.h"
 #include "mlir/Dialect/Quant/QuantOps.h"
 #include "mlir/Dialect/Quant/QuantizeUtils.h"
 #include "mlir/Dialect/Quant/UniformSupport.h"
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
-#include "mlir/IR/Attributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Matchers.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/IR/StandardTypes.h"
-#include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 
 using namespace mlir;
 using namespace mlir::quant;
 
 namespace {
-
-class ConvertConstPass : public FunctionPass<ConvertConstPass> {
-public:
+struct ConvertConstPass : public QuantConvertConstBase<ConvertConstPass> {
   void runOnFunction() override;
 };
 
@@ -71,8 +68,7 @@ QuantizedConstRewrite::matchAndRewrite(QuantizeCastOp qbarrier,
   }
 
   // Is the constant value a type expressed in a way that we support?
-  if (!value.isa<FloatAttr>() && !value.isa<DenseElementsAttr>() &&
-      !value.isa<SparseElementsAttr>()) {
+  if (!value.isa<FloatAttr, DenseElementsAttr, SparseElementsAttr>()) {
     return failure();
   }
 
@@ -85,9 +81,8 @@ QuantizedConstRewrite::matchAndRewrite(QuantizeCastOp qbarrier,
 
   // When creating the new const op, use a fused location that combines the
   // original const and the qbarrier that led to the quantization.
-  auto fusedLoc = FusedLoc::get(
-      {qbarrier.arg().getDefiningOp()->getLoc(), qbarrier.getLoc()},
-      rewriter.getContext());
+  auto fusedLoc = rewriter.getFusedLoc(
+      {qbarrier.arg().getDefiningOp()->getLoc(), qbarrier.getLoc()});
   auto newConstOp =
       rewriter.create<ConstantOp>(fusedLoc, newConstValueType, newConstValue);
   rewriter.replaceOpWithNewOp<StorageCastOp>(qbarrier, qbarrier.getType(),
@@ -96,17 +91,13 @@ QuantizedConstRewrite::matchAndRewrite(QuantizeCastOp qbarrier,
 }
 
 void ConvertConstPass::runOnFunction() {
-  OwningRewritePatternList patterns;
+  RewritePatternSet patterns(&getContext());
   auto func = getFunction();
   auto *context = &getContext();
-  patterns.insert<QuantizedConstRewrite>(context);
-  applyPatternsGreedily(func, patterns);
+  patterns.add<QuantizedConstRewrite>(context);
+  (void)applyPatternsAndFoldGreedily(func, std::move(patterns));
 }
 
-std::unique_ptr<OpPassBase<FuncOp>> mlir::quant::createConvertConstPass() {
+std::unique_ptr<OperationPass<FuncOp>> mlir::quant::createConvertConstPass() {
   return std::make_unique<ConvertConstPass>();
 }
-
-static PassRegistration<ConvertConstPass>
-    pass("quant-convert-const",
-         "Converts constants followed by qbarrier to actual quantized values");

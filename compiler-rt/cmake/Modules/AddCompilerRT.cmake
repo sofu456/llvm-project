@@ -1,5 +1,6 @@
 include(ExternalProject)
 include(CompilerRTUtils)
+include(HandleCompilerRT)
 
 function(set_target_output_directories target output_dir)
   # For RUNTIME_OUTPUT_DIRECTORY variable, Multi-configuration generators
@@ -108,11 +109,11 @@ endfunction()
 
 function(add_asm_sources output)
   set(${output} ${ARGN} PARENT_SCOPE)
-  # Xcode will try to compile asm files as C ('clang -x c'), and that will fail.
-  if (${CMAKE_GENERATOR} STREQUAL "Xcode")
-    enable_language(ASM)
-  else()
-    # Pass ASM file directly to the C++ compiler.
+  # CMake doesn't pass the correct architecture for Apple prior to CMake 3.19. https://gitlab.kitware.com/cmake/cmake/-/issues/20771
+  # MinGW didn't work correctly with assembly prior to CMake 3.17. https://gitlab.kitware.com/cmake/cmake/-/merge_requests/4287 and https://reviews.llvm.org/rGb780df052dd2b246a760d00e00f7de9ebdab9d09
+  # Workaround these two issues by compiling as C.
+  # Same workaround used in libunwind. Also update there if changed here.
+  if((APPLE AND CMAKE_VERSION VERSION_LESS 3.19) OR (MINGW AND CMAKE_VERSION VERSION_LESS 3.17))
     set_source_files_properties(${ARGN} PROPERTIES LANGUAGE C)
   endif()
 endfunction()
@@ -123,6 +124,21 @@ macro(set_output_name output name arch)
   else()
     if(ANDROID AND ${arch} STREQUAL "i386")
       set(${output} "${name}-i686${COMPILER_RT_OS_SUFFIX}")
+    elseif("${arch}" MATCHES "^arm")
+      if(COMPILER_RT_DEFAULT_TARGET_ONLY)
+        set(triple "${COMPILER_RT_DEFAULT_TARGET_TRIPLE}")
+      else()
+        set(triple "${TARGET_TRIPLE}")
+      endif()
+      # When using arch-suffixed runtime library names, clang only looks for
+      # libraries named "arm" or "armhf", see getArchNameForCompilerRTLib in
+      # clang. Therefore, try to inspect both the arch name and the triple
+      # if it seems like we're building an armhf target.
+      if ("${arch}" MATCHES "hf$" OR "${triple}" MATCHES "hf$")
+        set(${output} "${name}-armhf${COMPILER_RT_OS_SUFFIX}")
+      else()
+        set(${output} "${name}-arm${COMPILER_RT_OS_SUFFIX}")
+      endif()
     else()
       set(${output} "${name}-${arch}${COMPILER_RT_OS_SUFFIX}")
     endif()
@@ -139,6 +155,7 @@ endmacro()
 #                         CFLAGS <compile flags>
 #                         LINK_FLAGS <linker flags>
 #                         DEFS <compile definitions>
+#                         DEPS <dependencies>
 #                         LINK_LIBS <linked libraries> (only for shared library)
 #                         OBJECT_LIBS <object libraries to use as sources>
 #                         PARENT_TARGET <convenience parent target>
@@ -151,7 +168,7 @@ function(add_compiler_rt_runtime name type)
   cmake_parse_arguments(LIB
     ""
     "PARENT_TARGET"
-    "OS;ARCHS;SOURCES;CFLAGS;LINK_FLAGS;DEFS;LINK_LIBS;OBJECT_LIBS;ADDITIONAL_HEADERS"
+    "OS;ARCHS;SOURCES;CFLAGS;LINK_FLAGS;DEFS;DEPS;LINK_LIBS;OBJECT_LIBS;ADDITIONAL_HEADERS"
     ${ARGN})
   set(libnames)
   # Until we support this some other way, build compiler-rt runtime without LTO
@@ -231,6 +248,14 @@ function(add_compiler_rt_runtime name type)
           set_output_name(output_name_${libname} ${name}_dynamic ${arch})
         else()
           set_output_name(output_name_${libname} ${name} ${arch})
+        endif()
+      endif()
+      if(COMPILER_RT_USE_BUILTINS_LIBRARY AND NOT type STREQUAL "OBJECT" AND
+         NOT name STREQUAL "clang_rt.builtins")
+        get_compiler_rt_target(${arch} target)
+        find_compiler_rt_library(builtins ${target} builtins_${libname})
+        if(builtins_${libname} STREQUAL "NOTFOUND")
+          message(FATAL_ERROR "Cannot find builtins library for the target architecture")
         endif()
       endif()
       set(sources_${libname} ${LIB_SOURCES})
@@ -320,11 +345,17 @@ function(add_compiler_rt_runtime name type)
         RUNTIME DESTINATION ${install_dir_${libname}}
                 ${COMPONENT_OPTION})
     endif()
+    if(LIB_DEPS)
+      add_dependencies(${libname} ${LIB_DEPS})
+    endif()
     set_target_properties(${libname} PROPERTIES
         OUTPUT_NAME ${output_name_${libname}})
     set_target_properties(${libname} PROPERTIES FOLDER "Compiler-RT Runtime")
     if(LIB_LINK_LIBS)
       target_link_libraries(${libname} PRIVATE ${LIB_LINK_LIBS})
+    endif()
+    if(builtins_${libname})
+      target_link_libraries(${libname} PRIVATE ${builtins_${libname}})
     endif()
     if(${type} STREQUAL "SHARED")
       if(COMMAND llvm_setup_rpath)
@@ -363,39 +394,6 @@ function(add_compiler_rt_runtime name type)
     add_dependencies(${LIB_PARENT_TARGET} ${libnames})
   endif()
 endfunction()
-
-# when cross compiling, COMPILER_RT_TEST_COMPILER_CFLAGS help
-# in compilation and linking of unittests.
-string(REPLACE " " ";" COMPILER_RT_UNITTEST_CFLAGS "${COMPILER_RT_TEST_COMPILER_CFLAGS}")
-set(COMPILER_RT_UNITTEST_LINK_FLAGS ${COMPILER_RT_UNITTEST_CFLAGS})
-
-# Unittests support.
-set(COMPILER_RT_GTEST_PATH ${LLVM_MAIN_SRC_DIR}/utils/unittest/googletest)
-set(COMPILER_RT_GTEST_SOURCE ${COMPILER_RT_GTEST_PATH}/src/gtest-all.cc)
-set(COMPILER_RT_GTEST_CFLAGS
-  -DGTEST_NO_LLVM_SUPPORT=1
-  -DGTEST_HAS_RTTI=0
-  -I${COMPILER_RT_GTEST_PATH}/include
-  -I${COMPILER_RT_GTEST_PATH}
-)
-
-# Mocking support.
-set(COMPILER_RT_GMOCK_PATH ${LLVM_MAIN_SRC_DIR}/utils/unittest/googlemock)
-set(COMPILER_RT_GMOCK_SOURCE ${COMPILER_RT_GMOCK_PATH}/src/gmock-all.cc)
-set(COMPILER_RT_GMOCK_CFLAGS
-  -DGTEST_NO_LLVM_SUPPORT=1
-  -DGTEST_HAS_RTTI=0
-  -I${COMPILER_RT_GMOCK_PATH}/include
-  -I${COMPILER_RT_GMOCK_PATH}
-)
-
-append_list_if(COMPILER_RT_DEBUG -DSANITIZER_DEBUG=1 COMPILER_RT_UNITTEST_CFLAGS)
-append_list_if(COMPILER_RT_HAS_WCOVERED_SWITCH_DEFAULT_FLAG -Wno-covered-switch-default COMPILER_RT_UNITTEST_CFLAGS)
-
-if(MSVC)
-  # gtest use a lot of stuff marked as deprecated on Windows.
-  list(APPEND COMPILER_RT_GTEST_CFLAGS -Wno-deprecated-declarations)
-endif()
 
 # Compile and register compiler-rt tests.
 # generate_compiler_rt_tests(<output object files> <test_suite> <test_name>
@@ -474,7 +472,13 @@ function(add_compiler_rt_test test_suite test_name arch)
   # trump. With MSVC we can't do that because CMake is set up to run link.exe
   # when linking, not the compiler. Here, we hack it to use the compiler
   # because we want to use -fsanitize flags.
-  if(NOT MSVC)
+
+  # Only add CMAKE_EXE_LINKER_FLAGS when in a standalone bulid.
+  # Or else CMAKE_EXE_LINKER_FLAGS contains flags for build compiler of Clang/llvm.
+  # This might not be the same as what the COMPILER_RT_TEST_COMPILER supports.
+  # eg: the build compiler use lld linker and we build clang with default ld linker
+  # then to be tested clang will complain about lld options like --color-diagnostics.
+  if(NOT MSVC AND COMPILER_RT_STANDALONE_BUILD)
     set(TEST_LINK_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${TEST_LINK_FLAGS}")
     separate_arguments(TEST_LINK_FLAGS)
   endif()
@@ -545,7 +549,7 @@ macro(add_custom_libcxx name prefix)
   if(LIBCXX_USE_TOOLCHAIN)
     set(compiler_args -DCMAKE_C_COMPILER=${COMPILER_RT_TEST_COMPILER}
                       -DCMAKE_CXX_COMPILER=${COMPILER_RT_TEST_CXX_COMPILER})
-    if(NOT COMPILER_RT_STANDALONE_BUILD AND NOT RUNTIMES_BUILD)
+    if(NOT COMPILER_RT_STANDALONE_BUILD AND NOT LLVM_RUNTIMES_BUILD)
       set(toolchain_deps $<TARGET_FILE:clang>)
       set(force_deps DEPENDS $<TARGET_FILE:clang>)
     endif()
@@ -594,6 +598,10 @@ macro(add_custom_libcxx name prefix)
     CMAKE_OBJDUMP
     CMAKE_STRIP
     CMAKE_SYSROOT
+    LIBCXX_HAS_MUSL_LIBC
+    PYTHON_EXECUTABLE
+    Python3_EXECUTABLE
+    Python2_EXECUTABLE
     CMAKE_SYSTEM_NAME)
   foreach(variable ${PASSTHROUGH_VARIABLES})
     get_property(is_value_set CACHE ${variable} PROPERTY VALUE SET)

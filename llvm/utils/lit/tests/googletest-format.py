@@ -1,5 +1,8 @@
 # Check the various features of the GoogleTest format.
-#
+
+# FIXME: this test depends on order of tests
+# RUN: rm -f %{inputs}/googletest-format/.lit_test_times.txt
+
 # RUN: not %{lit} -j 1 -v %{inputs}/googletest-format > %t.out
 # FIXME: Temporarily dump test output so we can debug failing tests on
 # buildbots.
@@ -17,7 +20,7 @@
 # CHECK: ***
 # CHECK: PASS: googletest-format :: {{[Dd]ummy[Ss]ub[Dd]ir}}/OneTest.py/ParameterizedTest/0.subTest
 # CHECK: PASS: googletest-format :: {{[Dd]ummy[Ss]ub[Dd]ir}}/OneTest.py/ParameterizedTest/1.subTest
-# CHECK: Failing Tests (1)
-# CHECK: Expected Passes    : 3
-# CHECK: Unexpected Failures: 1
+# CHECK: Failed Tests (1)
+# CHECK: Passed: 3
+# CHECK: Failed: 1
 

@@ -131,7 +131,7 @@ ExceptionAnalyzer::ExceptionInfo ExceptionAnalyzer::throwsException(
   return Result;
 }
 
-/// Analyzes a single statment on it's throwing behaviour. This is in principle
+/// Analyzes a single statement on it's throwing behaviour. This is in principle
 /// possible except some 'Unknown' functions are called.
 ExceptionAnalyzer::ExceptionInfo ExceptionAnalyzer::throwsException(
     const Stmt *St, const ExceptionInfo::Throwables &Caught,
@@ -158,8 +158,8 @@ ExceptionAnalyzer::ExceptionInfo ExceptionAnalyzer::throwsException(
   } else if (const auto *Try = dyn_cast<CXXTryStmt>(St)) {
     ExceptionInfo Uncaught =
         throwsException(Try->getTryBlock(), Caught, CallStack);
-    for (unsigned i = 0; i < Try->getNumHandlers(); ++i) {
-      const CXXCatchStmt *Catch = Try->getHandler(i);
+    for (unsigned I = 0; I < Try->getNumHandlers(); ++I) {
+      const CXXCatchStmt *Catch = Try->getHandler(I);
 
       // Everything is catched through 'catch(...)'.
       if (!Catch->getExceptionDecl()) {

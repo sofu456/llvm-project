@@ -40,8 +40,6 @@ public:
   LibCppStdFunctionCallableInfo
   FindLibCppStdFunctionCallableInfo(lldb::ValueObjectSP &valobj_sp);
 
-  ~CPPLanguageRuntime() override;
-
   static char ID;
 
   bool isA(const void *ClassID) const override {
@@ -69,7 +67,7 @@ public:
   /// Obtain a ThreadPlan to get us into C++ constructs such as std::function.
   ///
   /// \param[in] thread
-  ///     Curent thrad of execution.
+  ///     Current thrad of execution.
   ///
   /// \param[in] stop_others
   ///     True if other threads should pause during execution.
@@ -79,7 +77,7 @@ public:
   lldb::ThreadPlanSP GetStepThroughTrampolinePlan(Thread &thread,
                                                   bool stop_others) override;
 
-  bool IsWhitelistedRuntimeValue(ConstString name) override;
+  bool IsAllowedRuntimeValue(ConstString name) override;
 protected:
   // Classes that inherit from CPPLanguageRuntime can see and modify these
   CPPLanguageRuntime(Process *process);
@@ -89,8 +87,6 @@ private:
     llvm::StringMap<CPPLanguageRuntime::LibCppStdFunctionCallableInfo>;
 
   OperatorStringToCallableInfoMap CallableLookupCache;
-
-  DISALLOW_COPY_AND_ASSIGN(CPPLanguageRuntime);
 };
 
 } // namespace lldb_private

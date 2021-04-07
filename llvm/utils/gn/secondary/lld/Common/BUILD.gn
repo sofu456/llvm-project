@@ -39,9 +39,7 @@ static_library("Common") {
     "Reproduce.cpp",
     "Strings.cpp",
     "TargetOptionsCommandFlags.cpp",
-    "Threads.cpp",
     "Timer.cpp",
     "Version.cpp",
   ]
-  defines = [ "HAVE_VCS_VERSION_INC" ]  # For Version.cpp
 }

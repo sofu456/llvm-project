@@ -1,18 +1,20 @@
-// RUN: mlir-opt %s -test-loop-fusion -test-loop-fusion-transformation -split-input-file -canonicalize | FileCheck %s
+// RUN: mlir-opt %s -allow-unregistered-dialect -test-loop-fusion -test-loop-fusion-transformation -split-input-file -canonicalize | FileCheck %s
 
 // CHECK-LABEL: func @slice_depth1_loop_nest() {
 func @slice_depth1_loop_nest() {
-  %0 = alloc() : memref<100xf32>
+  %0 = memref.alloc() : memref<100xf32>
   %cst = constant 7.000000e+00 : f32
   affine.for %i0 = 0 to 16 {
     affine.store %cst, %0[%i0] : memref<100xf32>
   }
   affine.for %i1 = 0 to 5 {
     %1 = affine.load %0[%i1] : memref<100xf32>
+    "prevent.dce"(%1) : (f32) -> ()
   }
   // CHECK:      affine.for %[[IV0:.*]] = 0 to 5 {
   // CHECK-NEXT:   affine.store %{{.*}}, %{{.*}}[%[[IV0]]] : memref<100xf32>
   // CHECK-NEXT:   affine.load %{{.*}}[%[[IV0]]] : memref<100xf32>
+  // CHECK-NEXT:   "prevent.dce"(%1) : (f32) -> ()
   // CHECK-NEXT: }
   // CHECK-NEXT: return
   return
@@ -22,9 +24,9 @@ func @slice_depth1_loop_nest() {
 
 // CHECK-LABEL: func @should_fuse_reduction_to_pointwise() {
 func @should_fuse_reduction_to_pointwise() {
-  %a = alloc() : memref<10x10xf32>
-  %b = alloc() : memref<10xf32>
-  %c = alloc() : memref<10xf32>
+  %a = memref.alloc() : memref<10x10xf32>
+  %b = memref.alloc() : memref<10xf32>
+  %c = memref.alloc() : memref<10xf32>
 
   %cf7 = constant 7.0 : f32
 
@@ -62,9 +64,9 @@ func @should_fuse_reduction_to_pointwise() {
 
 // CHECK-LABEL: func @should_fuse_avoiding_dependence_cycle() {
 func @should_fuse_avoiding_dependence_cycle() {
-  %a = alloc() : memref<10xf32>
-  %b = alloc() : memref<10xf32>
-  %c = alloc() : memref<10xf32>
+  %a = memref.alloc() : memref<10xf32>
+  %b = memref.alloc() : memref<10xf32>
+  %c = memref.alloc() : memref<10xf32>
 
   %cf7 = constant 7.0 : f32
 
@@ -74,15 +76,16 @@ func @should_fuse_avoiding_dependence_cycle() {
   // 3) loop1 -> loop2 on memref '%{{.*}}'
   affine.for %i0 = 0 to 10 {
     %v0 = affine.load %a[%i0] : memref<10xf32>
-    affine.store %cf7, %b[%i0] : memref<10xf32>
+    affine.store %v0, %b[%i0] : memref<10xf32>
   }
   affine.for %i1 = 0 to 10 {
     affine.store %cf7, %a[%i1] : memref<10xf32>
     %v1 = affine.load %c[%i1] : memref<10xf32>
+    "prevent.dce"(%v1) : (f32) -> ()
   }
   affine.for %i2 = 0 to 10 {
     %v2 = affine.load %b[%i2] : memref<10xf32>
-    affine.store %cf7, %c[%i2] : memref<10xf32>
+    affine.store %v2, %c[%i2] : memref<10xf32>
   }
   // Fusing loop first loop into last would create a cycle:
   //   {1} <--> {0, 2}
@@ -97,6 +100,7 @@ func @should_fuse_avoiding_dependence_cycle() {
   // CHECK-NEXT:   affine.store %{{.*}}, %{{.*}}[%{{.*}}] : memref<10xf32>
   // CHECK-NEXT:   affine.store %{{.*}}, %{{.*}}[%{{.*}}] : memref<10xf32>
   // CHECK-NEXT:   affine.load %{{.*}}[%{{.*}}] : memref<10xf32>
+  // CHECK-NEXT:   "prevent.dce"
   // CHECK-NEXT:   affine.load %{{.*}}[%{{.*}}] : memref<10xf32>
   // CHECK-NEXT:   affine.store %{{.*}}, %{{.*}}[%{{.*}}] : memref<10xf32>
   // CHECK-NEXT: }

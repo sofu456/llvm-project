@@ -23,9 +23,10 @@ public:
   OutputSegment(StringRef n) : name(n) {}
 
   void addInputSegment(InputSegment *inSeg) {
-    alignment = std::max(alignment, inSeg->getAlignment());
+    uint32_t segAlign = inSeg->alignment;
+    alignment = std::max(alignment, segAlign);
     inputSegments.push_back(inSeg);
-    size = llvm::alignTo(size, 1ULL << inSeg->getAlignment());
+    size = llvm::alignTo(size, 1ULL << segAlign);
     inSeg->outputSeg = this;
     inSeg->outputSegmentOffset = size;
     size += inSeg->getSize();
@@ -37,7 +38,7 @@ public:
   uint32_t initFlags = 0;
   uint32_t sectionOffset = 0;
   uint32_t alignment = 0;
-  uint32_t startVA = 0;
+  uint64_t startVA = 0;
   std::vector<InputSegment *> inputSegments;
 
   // Sum of the size of the all the input segments

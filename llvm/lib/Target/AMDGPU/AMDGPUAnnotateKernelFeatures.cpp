@@ -12,28 +12,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "AMDGPU.h"
-#include "AMDGPUSubtarget.h"
-#include "Utils/AMDGPUBaseInfo.h"
-#include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/Triple.h"
+#include "GCNSubtarget.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
-#include "llvm/IR/CallSite.h"
-#include "llvm/IR/Constant.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/Instruction.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Type.h"
-#include "llvm/IR/Use.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/Casting.h"
-#include "llvm/Support/ErrorHandling.h"
+#include "llvm/IR/IntrinsicsAMDGPU.h"
+#include "llvm/IR/IntrinsicsR600.h"
 #include "llvm/Target/TargetMachine.h"
 
 #define DEBUG_TYPE "amdgpu-annotate-kernel-features"
@@ -280,6 +264,7 @@ bool AMDGPUAnnotateKernelFeatures::addFeatureAttributes(Function &F) {
   bool HasApertureRegs = ST.hasApertureRegs();
   SmallPtrSet<const Constant *, 8> ConstantExprVisited;
 
+  bool HaveStackObjects = false;
   bool Changed = false;
   bool NeedQueuePtr = false;
   bool HaveCall = false;
@@ -287,13 +272,18 @@ bool AMDGPUAnnotateKernelFeatures::addFeatureAttributes(Function &F) {
 
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
-      CallSite CS(&I);
-      if (CS) {
-        Function *Callee = CS.getCalledFunction();
+      if (isa<AllocaInst>(I)) {
+        HaveStackObjects = true;
+        continue;
+      }
+
+      if (auto *CB = dyn_cast<CallBase>(&I)) {
+        const Function *Callee =
+            dyn_cast<Function>(CB->getCalledOperand()->stripPointerCasts());
 
         // TODO: Do something with indirect calls.
         if (!Callee) {
-          if (!CS.isInlineAsm())
+          if (!CB->isInlineAsm())
             HaveCall = true;
           continue;
         }
@@ -353,6 +343,11 @@ bool AMDGPUAnnotateKernelFeatures::addFeatureAttributes(Function &F) {
   // estimating whether there are calls before argument lowering.
   if (!IsFunc && HaveCall) {
     F.addFnAttr("amdgpu-calls");
+    Changed = true;
+  }
+
+  if (HaveStackObjects) {
+    F.addFnAttr("amdgpu-stack-objects");
     Changed = true;
   }
 

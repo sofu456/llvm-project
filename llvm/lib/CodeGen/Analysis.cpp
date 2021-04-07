@@ -25,6 +25,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/GlobalStatus.h"
 
 using namespace llvm;
@@ -42,13 +43,11 @@ unsigned llvm::ComputeLinearIndex(Type *Ty,
 
   // Given a struct type, recursively traverse the elements.
   if (StructType *STy = dyn_cast<StructType>(Ty)) {
-    for (StructType::element_iterator EB = STy->element_begin(),
-                                      EI = EB,
-                                      EE = STy->element_end();
-        EI != EE; ++EI) {
-      if (Indices && *Indices == unsigned(EI - EB))
-        return ComputeLinearIndex(*EI, Indices+1, IndicesEnd, CurIndex);
-      CurIndex = ComputeLinearIndex(*EI, nullptr, nullptr, CurIndex);
+    for (auto I : llvm::enumerate(STy->elements())) {
+      Type *ET = I.value();
+      if (Indices && *Indices == I.index())
+        return ComputeLinearIndex(ET, Indices + 1, IndicesEnd, CurIndex);
+      CurIndex = ComputeLinearIndex(ET, nullptr, nullptr, CurIndex);
     }
     assert(!Indices && "Unexpected out of bound");
     return CurIndex;
@@ -87,19 +86,25 @@ void llvm::ComputeValueVTs(const TargetLowering &TLI, const DataLayout &DL,
                            uint64_t StartingOffset) {
   // Given a struct type, recursively traverse the elements.
   if (StructType *STy = dyn_cast<StructType>(Ty)) {
-    const StructLayout *SL = DL.getStructLayout(STy);
+    // If the Offsets aren't needed, don't query the struct layout. This allows
+    // us to support structs with scalable vectors for operations that don't
+    // need offsets.
+    const StructLayout *SL = Offsets ? DL.getStructLayout(STy) : nullptr;
     for (StructType::element_iterator EB = STy->element_begin(),
                                       EI = EB,
                                       EE = STy->element_end();
-         EI != EE; ++EI)
+         EI != EE; ++EI) {
+      // Don't compute the element offset if we didn't get a StructLayout above.
+      uint64_t EltOffset = SL ? SL->getElementOffset(EI - EB) : 0;
       ComputeValueVTs(TLI, DL, *EI, ValueVTs, MemVTs, Offsets,
-                      StartingOffset + SL->getElementOffset(EI - EB));
+                      StartingOffset + EltOffset);
+    }
     return;
   }
   // Given an array type, recursively traverse the elements.
   if (ArrayType *ATy = dyn_cast<ArrayType>(Ty)) {
     Type *EltTy = ATy->getElementType();
-    uint64_t EltSize = DL.getTypeAllocSize(EltTy);
+    uint64_t EltSize = DL.getTypeAllocSize(EltTy).getFixedValue();
     for (unsigned i = 0, e = ATy->getNumElements(); i != e; ++i)
       ComputeValueVTs(TLI, DL, EltTy, ValueVTs, MemVTs, Offsets,
                       StartingOffset + i * EltSize);
@@ -130,16 +135,21 @@ void llvm::computeValueLLTs(const DataLayout &DL, Type &Ty,
                             uint64_t StartingOffset) {
   // Given a struct type, recursively traverse the elements.
   if (StructType *STy = dyn_cast<StructType>(&Ty)) {
-    const StructLayout *SL = DL.getStructLayout(STy);
-    for (unsigned I = 0, E = STy->getNumElements(); I != E; ++I)
+    // If the Offsets aren't needed, don't query the struct layout. This allows
+    // us to support structs with scalable vectors for operations that don't
+    // need offsets.
+    const StructLayout *SL = Offsets ? DL.getStructLayout(STy) : nullptr;
+    for (unsigned I = 0, E = STy->getNumElements(); I != E; ++I) {
+      uint64_t EltOffset = SL ? SL->getElementOffset(I) : 0;
       computeValueLLTs(DL, *STy->getElementType(I), ValueTys, Offsets,
-                       StartingOffset + SL->getElementOffset(I));
+                       StartingOffset + EltOffset);
+    }
     return;
   }
   // Given an array type, recursively traverse the elements.
   if (ArrayType *ATy = dyn_cast<ArrayType>(&Ty)) {
     Type *EltTy = ATy->getElementType();
-    uint64_t EltSize = DL.getTypeAllocSize(EltTy);
+    uint64_t EltSize = DL.getTypeAllocSize(EltTy).getFixedValue();
     for (unsigned i = 0, e = ATy->getNumElements(); i != e; ++i)
       computeValueLLTs(DL, *EltTy, ValueTys, Offsets,
                        StartingOffset + i * EltSize);
@@ -171,27 +181,6 @@ GlobalValue *llvm::ExtractTypeInfo(Value *V) {
   assert((GV || isa<ConstantPointerNull>(V)) &&
          "TypeInfo must be a global variable or NULL");
   return GV;
-}
-
-/// hasInlineAsmMemConstraint - Return true if the inline asm instruction being
-/// processed uses a memory 'm' constraint.
-bool
-llvm::hasInlineAsmMemConstraint(InlineAsm::ConstraintInfoVector &CInfos,
-                                const TargetLowering &TLI) {
-  for (unsigned i = 0, e = CInfos.size(); i != e; ++i) {
-    InlineAsm::ConstraintInfo &CI = CInfos[i];
-    for (unsigned j = 0, ee = CI.Codes.size(); j != ee; ++j) {
-      TargetLowering::ConstraintType CType = TLI.getConstraintType(CI.Codes[j]);
-      if (CType == TargetLowering::C_Memory)
-        return true;
-    }
-
-    // Indirect operand accesses access memory.
-    if (CI.isIndirect)
-      return true;
-  }
-
-  return false;
 }
 
 /// getFCmpCondCode - Return the ISD condition code corresponding to
@@ -312,8 +301,8 @@ static const Value *getNoopInput(const Value *V,
       DataBits = std::min((uint64_t)DataBits,
                          I->getType()->getPrimitiveSizeInBits().getFixedSize());
       NoopInput = Op;
-    } else if (auto CS = ImmutableCallSite(I)) {
-      const Value *ReturnedOp = CS.getReturnedArgOperand();
+    } else if (auto *CB = dyn_cast<CallBase>(I)) {
+      const Value *ReturnedOp = CB->getReturnedArgOperand();
       if (ReturnedOp && isNoopBitcast(ReturnedOp->getType(), I->getType(), TLI))
         NoopInput = ReturnedOp;
     } else if (const InsertValueInst *IVI = dyn_cast<InsertValueInst>(V)) {
@@ -509,9 +498,8 @@ static bool nextRealType(SmallVectorImpl<Type *> &SubTypes,
 /// between it and the return.
 ///
 /// This function only tests target-independent requirements.
-bool llvm::isInTailCallPosition(ImmutableCallSite CS, const TargetMachine &TM) {
-  const Instruction *I = CS.getInstruction();
-  const BasicBlock *ExitBB = I->getParent();
+bool llvm::isInTailCallPosition(const CallBase &Call, const TargetMachine &TM) {
+  const BasicBlock *ExitBB = Call.getParent();
   const Instruction *Term = ExitBB->getTerminator();
   const ReturnInst *Ret = dyn_cast<ReturnInst>(Term);
 
@@ -525,33 +513,36 @@ bool llvm::isInTailCallPosition(ImmutableCallSite CS, const TargetMachine &TM) {
   // been fully understood.
   if (!Ret &&
       ((!TM.Options.GuaranteedTailCallOpt &&
-        CS.getCallingConv() != CallingConv::Tail) || !isa<UnreachableInst>(Term)))
+        Call.getCallingConv() != CallingConv::Tail) || !isa<UnreachableInst>(Term)))
     return false;
 
   // If I will have a chain, make sure no other instruction that will have a
   // chain interposes between I and the return.
-  if (I->mayHaveSideEffects() || I->mayReadFromMemory() ||
-      !isSafeToSpeculativelyExecute(I))
-    for (BasicBlock::const_iterator BBI = std::prev(ExitBB->end(), 2);; --BBI) {
-      if (&*BBI == I)
-        break;
-      // Debug info intrinsics do not get in the way of tail call optimization.
-      if (isa<DbgInfoIntrinsic>(BBI))
+  // Check for all calls including speculatable functions.
+  for (BasicBlock::const_iterator BBI = std::prev(ExitBB->end(), 2);; --BBI) {
+    if (&*BBI == &Call)
+      break;
+    // Debug info intrinsics do not get in the way of tail call optimization.
+    if (isa<DbgInfoIntrinsic>(BBI))
+      continue;
+    // Pseudo probe intrinsics do not block tail call optimization either.
+    if (isa<PseudoProbeInst>(BBI))
+      continue;
+    // A lifetime end, assume or noalias.decl intrinsic should not stop tail
+    // call optimization.
+    if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(BBI))
+      if (II->getIntrinsicID() == Intrinsic::lifetime_end ||
+          II->getIntrinsicID() == Intrinsic::assume ||
+          II->getIntrinsicID() == Intrinsic::experimental_noalias_scope_decl)
         continue;
-      // A lifetime end or assume intrinsic should not stop tail call
-      // optimization.
-      if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(BBI))
-        if (II->getIntrinsicID() == Intrinsic::lifetime_end ||
-            II->getIntrinsicID() == Intrinsic::assume)
-          continue;
-      if (BBI->mayHaveSideEffects() || BBI->mayReadFromMemory() ||
-          !isSafeToSpeculativelyExecute(&*BBI))
-        return false;
-    }
+    if (BBI->mayHaveSideEffects() || BBI->mayReadFromMemory() ||
+        !isSafeToSpeculativelyExecute(&*BBI))
+      return false;
+  }
 
   const Function *F = ExitBB->getParent();
   return returnTypeIsEligibleForTailCall(
-      F, I, Ret, *TM.getSubtargetImpl(*F)->getTargetLowering());
+      F, &Call, Ret, *TM.getSubtargetImpl(*F)->getTargetLowering());
 }
 
 bool llvm::attributesPermitTailCall(const Function *F, const Instruction *I,
@@ -740,8 +731,7 @@ static void collectEHScopeMembers(
     if (Visiting->isEHScopeReturnBlock())
       continue;
 
-    for (const MachineBasicBlock *Succ : Visiting->successors())
-      Worklist.push_back(Succ);
+    append_range(Worklist, Visiting->successors());
   }
 }
 

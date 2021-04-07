@@ -11,8 +11,8 @@ set(LLDB_LIBEDIT_LIBS)
 
 if (LLDB_ENABLE_CURSES)
   list(APPEND LLDB_CURSES_LIBS ${CURSES_LIBRARIES} ${PANEL_LIBRARIES})
-  if(LLVM_ENABLE_TERMINFO AND HAVE_TERMINFO)
-    list(APPEND LLDB_CURSES_LIBS ${TERMINFO_LIBS})
+  if(LLVM_ENABLE_TERMINFO)
+    list(APPEND LLDB_CURSES_LIBS ${TERMINFO_LIB})
   endif()
   if (LLVM_BUILD_STATIC)
     list(APPEND LLDB_CURSES_LIBS gpm)
@@ -24,7 +24,6 @@ add_lldb_library(lldbCore
   AddressRange.cpp
   AddressResolver.cpp
   AddressResolverFileLine.cpp
-  AddressResolverName.cpp
   Communication.cpp
   Debugger.cpp
   Disassembler.cpp
@@ -44,6 +43,7 @@ add_lldb_library(lldbCore
   ModuleList.cpp
   Opcode.cpp
   PluginManager.cpp
+  Progress.cpp
   RichManglingContext.cpp
   SearchFilter.cpp
   Section.cpp
@@ -64,6 +64,7 @@ add_lldb_library(lldbCore
   ValueObjectMemory.cpp
   ValueObjectRegister.cpp
   ValueObjectSyntheticFilter.cpp
+  ValueObjectUpdater.cpp
   ValueObjectVariable.cpp
 
   DEPENDS

@@ -85,6 +85,10 @@ combined with other commands:
 
   Display the symbol table.
 
+.. option:: -T, --dynamic-syms
+
+  Display the contents of the dynamic symbol table.
+
 .. option:: -u, --unwind-info
 
   Display the unwind info of the input(s).
@@ -119,6 +123,17 @@ OPTIONS
 
   Demangle symbol names in the output.
 
+.. option:: --debug-vars=<format>
+
+  Print the locations (in registers or memory) of source-level variables
+  alongside disassembly. ``format`` may be ``unicode`` or ``ascii``, defaulting
+  to ``unicode`` if omitted.
+
+.. option:: --debug-vars-indent=<width>
+
+  Distance to indent the source-level variable display, relative to the start
+  of the disassembly. Defaults to 40 characters.
+
 .. option:: -j, --section=<section1[,section2,...]>
 
   Perform commands on the specified sections only. For Mach-O use
@@ -141,7 +156,7 @@ OPTIONS
 
 .. option:: --mattr=<a1,+a2,-a3,...>
 
-  Enable/disable target-specific attributes. Specify ``--mcpu=help`` to display
+  Enable/disable target-specific attributes. Specify ``--mattr=help`` to display
   the available attributes.
 
 .. option:: --no-leading-addr
@@ -151,6 +166,17 @@ OPTIONS
 .. option:: --no-show-raw-insn
 
   When disassembling, do not print the raw bytes of each instruction.
+
+.. option:: --prefix=<prefix>
+
+  When disassembling with the :option:`--source` option, prepend ``prefix`` to
+  absolute paths.
+
+.. option:: --prefix-strip=<level>
+
+  When disassembling with the :option:`--source` option, strip out ``level``
+  initial directories from absolute paths. This option has no effect without
+  :option:`--prefix`.
 
 .. option:: --print-imm-hex
 
@@ -181,6 +207,30 @@ OPTIONS
   When printing relocations, only print the relocations patching offsets up to ``address``.
 
   When printing symbols, only print symbols with a value up to ``address``.
+
+.. option:: --symbolize-operands
+
+  When disassembling, symbolize a branch target operand to print a label instead of a real address.
+
+  When printing a PC-relative global symbol reference, print it as an offset from the leading symbol.
+
+  Only works with an X86 linked image.
+
+  Example:
+    A non-symbolized branch instruction with a local target and pc-relative memory access like
+
+  .. code-block:: none
+
+      cmp eax, dword ptr [rip + 4112]
+      jge 0x20117e <_start+0x25>
+
+  might become
+
+  .. code-block:: none
+
+     <L0>:
+       cmp eax, dword ptr <g>
+       jge	<L0>
 
 .. option:: --triple=<string>
 
@@ -260,6 +310,10 @@ MACH-O ONLY OPTIONS AND COMMANDS
 
   Display exported symbols.
 
+.. option:: --function-starts
+
+  Print the function starts table for Mach-O objects.
+
 .. option:: -g
 
   Print line information from debug info if available.
@@ -320,6 +374,13 @@ MACH-O ONLY OPTIONS AND COMMANDS
 .. option:: --weak-bind
 
   Display weak binding information.
+
+XCOFF ONLY OPTIONS AND COMMANDS
+---------------------------------
+
+.. option:: --symbol-description
+
+  Add symbol description to disassembly output.
 
 BUGS
 ----

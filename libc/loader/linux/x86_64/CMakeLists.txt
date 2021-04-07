@@ -3,8 +3,11 @@ add_loader_object(
   SRC
     start.cpp
   DEPENDS
-    linux_syscall_h
-    sys_syscall_h
+    libc.config.linux.linux_syscall_h
+    libc.config.linux.app_h
+    libc.include.sys_syscall
+    libc.src.string.memcpy
+    libc.src.sys.mman.mmap
   COMPILE_OPTIONS
     -fno-omit-frame-pointer
     -ffreestanding # To avoid compiler warnings about calling the main function.

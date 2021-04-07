@@ -14,14 +14,15 @@
 #define TOY_OPS
 
 include "mlir/Interfaces/CallInterfaces.td"
-include "mlir/Interfaces/SideEffects.td"
+include "mlir/Interfaces/CastInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 include "toy/ShapeInferenceInterface.td"
 
 // Provide a definition of the 'toy' dialect in the ODS framework so that we
 // can define our operations.
 def Toy_Dialect : Dialect {
   let name = "toy";
-  let cppNamespace = "toy";
+  let cppNamespace = "::mlir::toy";
 }
 
 // Base class for toy dialect operations. This operation inherits from the base
@@ -69,13 +70,12 @@ def ConstantOp : Toy_Op<"constant", [NoSideEffect]> {
   // using `builder.create<ConstantOp>(...)`.
   let builders = [
     // Build a constant with a given constant tensor value.
-    OpBuilder<"Builder *builder, OperationState &state, "
-              "DenseElementsAttr value", [{
-      build(builder, state, value.getType(), value);
+    OpBuilder<(ins "DenseElementsAttr":$value), [{
+      build($_builder, $_state, value.getType(), value);
     }]>,
 
     // Build a constant with a given constant floating-point value.
-    OpBuilder<"Builder *builder, OperationState &state, double value">
+    OpBuilder<(ins "double":$value)>
   ];
 
   // Invoke a static verify method to verify this constant operation.
@@ -99,29 +99,29 @@ def AddOp : Toy_Op<"add",
 
   // Allow building an AddOp with from the two input operands.
   let builders = [
-    OpBuilder<"Builder *b, OperationState &state, Value lhs, Value rhs">
+    OpBuilder<(ins "Value":$lhs, "Value":$rhs)>
   ];
 }
 
-def CastOp : Toy_Op<"cast",
-    [DeclareOpInterfaceMethods<ShapeInferenceOpInterface>, NoSideEffect,
-     SameOperandsAndResultShape]> {
+def CastOp : Toy_Op<"cast", [
+     DeclareOpInterfaceMethods<CastOpInterface>,
+     DeclareOpInterfaceMethods<ShapeInferenceOpInterface>,
+     NoSideEffect,
+     SameOperandsAndResultShape
+  ]> {
   let summary = "shape cast operation";
   let description = [{
     The "cast" operation converts a tensor from one type to an equivalent type
-    without changing any data elements. The source and destination types
-    must both be tensor types with the same element type. If both are ranked
-    then the rank should be the same and static dimensions should match. The
-    operation is invalid if converting to a mismatching constant dimension.
+    without changing any data elements. The source and destination types must
+    both be tensor types with the same element type. If both are ranked, then
+    shape is required to match. The operation is invalid if converting to a
+    mismatching constant dimension.
   }];
 
   let arguments = (ins F64Tensor:$input);
   let results = (outs F64Tensor:$output);
 
   let assemblyFormat = "$input attr-dict `:` type($input) `to` type($output)";
-
-  // Set the folder bit so that we can fold redundant cast operations.
-  let hasFolder = 1;
 }
 
 def GenericCallOp : Toy_Op<"generic_call",
@@ -149,15 +149,14 @@ def GenericCallOp : Toy_Op<"generic_call",
   // The generic call operation returns a single value of TensorType.
   let results = (outs F64Tensor);
 
-  // The return operation only emits the input in the format if it is present.
+  // Specialize assembly printing and parsing using a declarative format.
   let assemblyFormat = [{
     $callee `(` $inputs `)` attr-dict `:` functional-type($inputs, results)
   }];
 
   // Add custom build methods for the generic call operation.
   let builders = [
-    OpBuilder<"Builder *builder, OperationState &state, "
-              "StringRef callee, ArrayRef<Value> arguments">
+    OpBuilder<(ins "StringRef":$callee, "ArrayRef<Value>":$arguments)>
   ];
 }
 
@@ -178,7 +177,7 @@ def MulOp : Toy_Op<"mul",
 
   // Allow building a MulOp with from the two input operands.
   let builders = [
-    OpBuilder<"Builder *b, OperationState &state, Value lhs, Value rhs">
+    OpBuilder<(ins "Value":$lhs, "Value":$rhs)>
   ];
 }
 
@@ -245,9 +244,9 @@ def ReturnOp : Toy_Op<"return", [NoSideEffect, HasParent<"FuncOp">,
   let assemblyFormat = "($input^ `:` type($input))? attr-dict ";
 
   // Allow building a ReturnOp with no return operand.
-  let builders = [OpBuilder<
-    "Builder *b, OperationState &state", [{ build(b, state, llvm::None); }]
-  >];
+  let builders = [
+    OpBuilder<(ins), [{ build($_builder, $_state, llvm::None); }]>
+  ];
 
   // Provide extra utility definitions on the c++ operation class definition.
   let extraClassDeclaration = [{
@@ -274,7 +273,7 @@ def TransposeOp : Toy_Op<"transpose",
 
   // Allow building a TransposeOp with from the input operand.
   let builders = [
-    OpBuilder<"Builder *b, OperationState &state, Value input">
+    OpBuilder<(ins "Value":$input)>
   ];
 
   // Invoke a static verify method to verify this transpose operation.

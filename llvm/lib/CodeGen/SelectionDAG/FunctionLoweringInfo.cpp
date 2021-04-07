@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/Analysis/LegacyDivergenceAnalysis.h"
 #include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -134,8 +135,20 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
     for (const Instruction &I : BB) {
       if (const AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
         Type *Ty = AI->getAllocatedType();
+        Align TyPrefAlign = MF->getDataLayout().getPrefTypeAlign(Ty);
+        // The "specified" alignment is the alignment written on the alloca,
+        // or the preferred alignment of the type if none is specified.
+        //
+        // (Unspecified alignment on allocas will be going away soon.)
+        Align SpecifiedAlign = AI->getAlign();
+
+        // If the preferred alignment of the type is higher than the specified
+        // alignment of the alloca, promote the alignment, as long as it doesn't
+        // require realigning the stack.
+        //
+        // FIXME: Do we really want to second-guess the IR in isel?
         Align Alignment =
-            max(MF->getDataLayout().getPrefTypeAlign(Ty), AI->getAlign());
+            std::max(std::min(TyPrefAlign, StackAlign), SpecifiedAlign);
 
         // Static allocas can be folded into the initial stack frame
         // adjustment. For targets that don't realign the stack, don't
@@ -161,7 +174,7 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
 
           // Scalable vectors may need a special StackID to distinguish
           // them from other (fixed size) stack objects.
-          if (Ty->isVectorTy() && Ty->getVectorIsScalable())
+          if (isa<ScalableVectorType>(Ty))
             MF->getFrameInfo().setStackID(FrameIndex,
                                           TFI->getStackIDForScalableVectors());
 
@@ -177,18 +190,16 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
           // stack allocation for each one.
           // Inform the Frame Information that we have variable-sized objects.
           MF->getFrameInfo().CreateVariableSizedObject(
-              Alignment <= StackAlign ? 0 : Alignment.value(), AI);
+              Alignment <= StackAlign ? Align(1) : Alignment, AI);
         }
-      }
-
-      // Look for inline asm that clobbers the SP register.
-      if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
-        ImmutableCallSite CS(&I);
-        if (isa<InlineAsm>(CS.getCalledValue())) {
-          unsigned SP = TLI->getStackPointerRegisterToSaveRestore();
+      } else if (auto *Call = dyn_cast<CallBase>(&I)) {
+        // Look for inline asm that clobbers the SP register.
+        if (Call->isInlineAsm()) {
+          Register SP = TLI->getStackPointerRegisterToSaveRestore();
           const TargetRegisterInfo *TRI = MF->getSubtarget().getRegisterInfo();
           std::vector<TargetLowering::AsmOperandInfo> Ops =
-              TLI->ParseConstraints(Fn->getParent()->getDataLayout(), TRI, CS);
+              TLI->ParseConstraints(Fn->getParent()->getDataLayout(), TRI,
+                                    *Call);
           for (TargetLowering::AsmOperandInfo &Op : Ops) {
             if (Op.Type == InlineAsm::isClobber) {
               // Clobbers don't have SDValue operands, hence SDValue().
@@ -201,21 +212,20 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
             }
           }
         }
-      }
+        // Look for calls to the @llvm.va_start intrinsic. We can omit some
+        // prologue boilerplate for variadic functions that don't examine their
+        // arguments.
+        if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
+          if (II->getIntrinsicID() == Intrinsic::vastart)
+            MF->getFrameInfo().setHasVAStart(true);
+        }
 
-      // Look for calls to the @llvm.va_start intrinsic. We can omit some
-      // prologue boilerplate for variadic functions that don't examine their
-      // arguments.
-      if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
-        if (II->getIntrinsicID() == Intrinsic::vastart)
-          MF->getFrameInfo().setHasVAStart(true);
-      }
-
-      // If we have a musttail call in a variadic function, we need to ensure we
-      // forward implicit register parameters.
-      if (const auto *CI = dyn_cast<CallInst>(&I)) {
-        if (CI->isMustTailCall() && Fn->isVarArg())
-          MF->getFrameInfo().setHasMustTailInVarArgFunc(true);
+        // If we have a musttail call in a variadic function, we need to ensure
+        // we forward implicit register parameters.
+        if (const auto *CI = dyn_cast<CallInst>(&I)) {
+          if (CI->isMustTailCall() && Fn->isVarArg())
+            MF->getFrameInfo().setHasMustTailInVarArgFunc(true);
+        }
       }
 
       // Mark values used outside their block as exported, by allocating
@@ -320,14 +330,23 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
 
   else if (Personality == EHPersonality::Wasm_CXX) {
     WasmEHFuncInfo &EHInfo = *MF->getWasmEHFuncInfo();
-    // Map all BB references in the WinEH data to MBBs.
-    DenseMap<BBOrMBB, BBOrMBB> NewMap;
-    for (auto &KV : EHInfo.EHPadUnwindMap) {
+    // Map all BB references in the Wasm EH data to MBBs.
+    DenseMap<BBOrMBB, BBOrMBB> SrcToUnwindDest;
+    for (auto &KV : EHInfo.SrcToUnwindDest) {
       const auto *Src = KV.first.get<const BasicBlock *>();
-      const auto *Dst = KV.second.get<const BasicBlock *>();
-      NewMap[MBBMap[Src]] = MBBMap[Dst];
+      const auto *Dest = KV.second.get<const BasicBlock *>();
+      SrcToUnwindDest[MBBMap[Src]] = MBBMap[Dest];
     }
-    EHInfo.EHPadUnwindMap = std::move(NewMap);
+    EHInfo.SrcToUnwindDest = std::move(SrcToUnwindDest);
+    DenseMap<BBOrMBB, SmallPtrSet<BBOrMBB, 4>> UnwindDestToSrcs;
+    for (auto &KV : EHInfo.UnwindDestToSrcs) {
+      const auto *Dest = KV.first.get<const BasicBlock *>();
+      UnwindDestToSrcs[MBBMap[Dest]] = SmallPtrSet<BBOrMBB, 4>();
+      for (const auto P : KV.second)
+        UnwindDestToSrcs[MBBMap[Dest]].insert(
+            MBBMap[P.get<const BasicBlock *>()]);
+    }
+    EHInfo.UnwindDestToSrcs = std::move(UnwindDestToSrcs);
   }
 }
 
@@ -347,12 +366,12 @@ void FunctionLoweringInfo::clear() {
   RegFixups.clear();
   RegsWithFixups.clear();
   StatepointStackSlots.clear();
-  StatepointSpillMaps.clear();
+  StatepointRelocationMaps.clear();
   PreferredExtendType.clear();
 }
 
 /// CreateReg - Allocate a single virtual register for the given type.
-unsigned FunctionLoweringInfo::CreateReg(MVT VT, bool isDivergent) {
+Register FunctionLoweringInfo::CreateReg(MVT VT, bool isDivergent) {
   return RegInfo->createVirtualRegister(
       MF->getSubtarget().getTargetLowering()->getRegClassFor(VT, isDivergent));
 }
@@ -364,27 +383,27 @@ unsigned FunctionLoweringInfo::CreateReg(MVT VT, bool isDivergent) {
 /// In the case that the given value has struct or array type, this function
 /// will assign registers for each member or element.
 ///
-unsigned FunctionLoweringInfo::CreateRegs(Type *Ty, bool isDivergent) {
+Register FunctionLoweringInfo::CreateRegs(Type *Ty, bool isDivergent) {
   const TargetLowering *TLI = MF->getSubtarget().getTargetLowering();
 
   SmallVector<EVT, 4> ValueVTs;
   ComputeValueVTs(*TLI, MF->getDataLayout(), Ty, ValueVTs);
 
-  unsigned FirstReg = 0;
+  Register FirstReg;
   for (unsigned Value = 0, e = ValueVTs.size(); Value != e; ++Value) {
     EVT ValueVT = ValueVTs[Value];
     MVT RegisterVT = TLI->getRegisterType(Ty->getContext(), ValueVT);
 
     unsigned NumRegs = TLI->getNumRegisters(Ty->getContext(), ValueVT);
     for (unsigned i = 0; i != NumRegs; ++i) {
-      unsigned R = CreateReg(RegisterVT, isDivergent);
+      Register R = CreateReg(RegisterVT, isDivergent);
       if (!FirstReg) FirstReg = R;
     }
   }
   return FirstReg;
 }
 
-unsigned FunctionLoweringInfo::CreateRegs(const Value *V) {
+Register FunctionLoweringInfo::CreateRegs(const Value *V) {
   return CreateRegs(V->getType(), DA && DA->isDivergent(V) &&
                     !TLI->requiresUniformRegister(*MF, V));
 }
@@ -395,7 +414,7 @@ unsigned FunctionLoweringInfo::CreateRegs(const Value *V) {
 /// the larger bit width by zero extension. The bit width must be no smaller
 /// than the LiveOutInfo's existing bit width.
 const FunctionLoweringInfo::LiveOutInfo *
-FunctionLoweringInfo::GetLiveOutRegInfo(unsigned Reg, unsigned BitWidth) {
+FunctionLoweringInfo::GetLiveOutRegInfo(Register Reg, unsigned BitWidth) {
   if (!LiveOutRegInfo.inBounds(Reg))
     return nullptr;
 
@@ -429,7 +448,7 @@ void FunctionLoweringInfo::ComputePHILiveOutRegInfo(const PHINode *PN) {
   IntVT = TLI->getTypeToTransformTo(PN->getContext(), IntVT);
   unsigned BitWidth = IntVT.getSizeInBits();
 
-  unsigned DestReg = ValueMap[PN];
+  Register DestReg = ValueMap[PN];
   if (!Register::isVirtualRegister(DestReg))
     return;
   LiveOutRegInfo.grow(DestReg);
@@ -445,12 +464,11 @@ void FunctionLoweringInfo::ComputePHILiveOutRegInfo(const PHINode *PN) {
   if (ConstantInt *CI = dyn_cast<ConstantInt>(V)) {
     APInt Val = CI->getValue().zextOrTrunc(BitWidth);
     DestLOI.NumSignBits = Val.getNumSignBits();
-    DestLOI.Known.Zero = ~Val;
-    DestLOI.Known.One = Val;
+    DestLOI.Known = KnownBits::makeConstant(Val);
   } else {
     assert(ValueMap.count(V) && "V should have been placed in ValueMap when its"
                                 "CopyToReg node was created.");
-    unsigned SrcReg = ValueMap[V];
+    Register SrcReg = ValueMap[V];
     if (!Register::isVirtualRegister(SrcReg)) {
       DestLOI.IsValid = false;
       return;
@@ -485,8 +503,8 @@ void FunctionLoweringInfo::ComputePHILiveOutRegInfo(const PHINode *PN) {
 
     assert(ValueMap.count(V) && "V should have been placed in ValueMap when "
                                 "its CopyToReg node was created.");
-    unsigned SrcReg = ValueMap[V];
-    if (!Register::isVirtualRegister(SrcReg)) {
+    Register SrcReg = ValueMap[V];
+    if (!SrcReg.isVirtual()) {
       DestLOI.IsValid = false;
       return;
     }
@@ -496,8 +514,7 @@ void FunctionLoweringInfo::ComputePHILiveOutRegInfo(const PHINode *PN) {
       return;
     }
     DestLOI.NumSignBits = std::min(DestLOI.NumSignBits, SrcLOI->NumSignBits);
-    DestLOI.Known.Zero &= SrcLOI->Known.Zero;
-    DestLOI.Known.One &= SrcLOI->Known.One;
+    DestLOI.Known = KnownBits::commonBits(DestLOI.Known, SrcLOI->Known);
   }
 }
 
@@ -520,11 +537,11 @@ int FunctionLoweringInfo::getArgumentFrameIndex(const Argument *A) {
   return INT_MAX;
 }
 
-unsigned FunctionLoweringInfo::getCatchPadExceptionPointerVReg(
+Register FunctionLoweringInfo::getCatchPadExceptionPointerVReg(
     const Value *CPI, const TargetRegisterClass *RC) {
   MachineRegisterInfo &MRI = MF->getRegInfo();
   auto I = CatchPadExceptionPointers.insert({CPI, 0});
-  unsigned &VReg = I.first->second;
+  Register &VReg = I.first->second;
   if (I.second)
     VReg = MRI.createVirtualRegister(RC);
   assert(VReg && "null vreg in exception pointer table!");
@@ -532,7 +549,7 @@ unsigned FunctionLoweringInfo::getCatchPadExceptionPointerVReg(
 }
 
 const Value *
-FunctionLoweringInfo::getValueFromVirtualReg(unsigned Vreg) {
+FunctionLoweringInfo::getValueFromVirtualReg(Register Vreg) {
   if (VirtReg2Value.empty()) {
     SmallVector<EVT, 4> ValueVTs;
     for (auto &P : ValueMap) {

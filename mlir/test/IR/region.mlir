@@ -1,4 +1,4 @@
-// RUN: mlir-opt %s -split-input-file -verify-diagnostics | FileCheck %s
+// RUN: mlir-opt -allow-unregistered-dialect %s -split-input-file -verify-diagnostics | FileCheck %s
 
 //===----------------------------------------------------------------------===//
 // Test the number of regions
@@ -16,7 +16,7 @@ func @correct_number_of_regions() {
 // -----
 
 func @missing_regions() {
-    // expected-error@+1 {{op has incorrect number of regions: expected 2 but found 1}}
+    // expected-error@+1 {{expected 2 regions}}
     "test.two_region_op"()(
       {"work"() : () -> ()}
     ) : () -> ()
@@ -26,7 +26,7 @@ func @missing_regions() {
 // -----
 
 func @extra_regions() {
-    // expected-error@+1 {{op has incorrect number of regions: expected 2 but found 3}}
+    // expected-error@+1 {{expected 2 regions}}
     "test.two_region_op"()(
       {"work"() : () -> ()},
       {"work"() : () -> ()},
@@ -73,3 +73,31 @@ func @named_region_has_wrong_number_of_blocks() {
     }) : () -> ()
     return
 }
+
+// -----
+
+// Region with single block and not terminator.
+// CHECK: unregistered_without_terminator
+"test.unregistered_without_terminator"() ( {
+  ^bb0:  // no predecessors
+}) : () -> ()
+
+// -----
+
+// CHECK: test.single_no_terminator_op
+"test.single_no_terminator_op"() (
+  {
+    func @foo1() { return }
+    func @foo2() { return }
+  }
+) : () -> ()
+
+// CHECK: test.variadic_no_terminator_op
+"test.variadic_no_terminator_op"() (
+  {
+    func @foo1() { return }
+  },
+  {
+    func @foo2() { return }
+  }
+) : () -> ()

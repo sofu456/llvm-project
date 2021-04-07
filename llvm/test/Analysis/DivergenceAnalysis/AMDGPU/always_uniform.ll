@@ -1,4 +1,5 @@
-; RUN: opt  -mtriple amdgcn-unknown-amdhsa -analyze -divergence -use-gpu-divergence-analysis %s | FileCheck %s
+; RUN: opt  -mtriple amdgcn-unknown-amdhsa -enable-new-pm=0 -analyze -divergence -use-gpu-divergence-analysis %s | FileCheck %s
+; RUN: opt -mtriple amdgcn-unknown-amdhsa -passes='print<divergence>' -disable-output %s 2>&1 | FileCheck %s
 
 ; CHECK-LABEL: for function 'readfirstlane':
 define amdgpu_kernel void @readfirstlane() {
@@ -23,6 +24,13 @@ define amdgpu_kernel void @fcmp(float inreg %x, float inreg %y) {
   ret void
 }
 
+; CHECK-LABEL: for function 'ballot':
+define amdgpu_kernel void @ballot(i1 inreg %x) {
+; CHECK-NOT: DIVERGENT:  %ballot = call i64 @llvm.amdgcn.ballot.i32
+  %ballot = call i64 @llvm.amdgcn.ballot.i32(i1 %x)
+  ret void
+}
+
 ; SGPR asm outputs are uniform regardless of the input operands.
 ; CHECK-LABEL: for function 'asm_sgpr':
 ; CHECK: DIVERGENT: i32 %divergent
@@ -32,7 +40,7 @@ define i32 @asm_sgpr(i32 %divergent) {
   ret i32 %sgpr
 }
 
-; CHECK-LABEL: Printing analysis 'Legacy Divergence Analysis' for function 'asm_mixed_sgpr_vgpr':
+; CHECK-LABEL: Divergence Analysis' for function 'asm_mixed_sgpr_vgpr':
 ; CHECK: DIVERGENT: %asm = call { i32, i32 } asm "; def $0, $1, $2", "=s,=v,v"(i32 %divergent)
 ; CHECK-NEXT: {{^[ \t]+}}%sgpr = extractvalue { i32, i32 } %asm, 0
 ; CHECK-NEXT: DIVERGENT:       %vgpr = extractvalue { i32, i32 } %asm, 1
@@ -49,6 +57,7 @@ declare i32 @llvm.amdgcn.workitem.id.x() #0
 declare i32 @llvm.amdgcn.readfirstlane(i32) #0
 declare i64 @llvm.amdgcn.icmp.i32(i32, i32, i32) #1
 declare i64 @llvm.amdgcn.fcmp.i32(float, float, i32) #1
+declare i64 @llvm.amdgcn.ballot.i32(i1) #1
 
 attributes #0 = { nounwind readnone }
 attributes #1 = { nounwind readnone convergent }

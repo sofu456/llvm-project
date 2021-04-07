@@ -91,8 +91,6 @@ private:
   /// all registers that were disabled are removed from the list.
   SmallVector<MCPhysReg, 16> UpdatedCSRs;
 
-  void initUpdatedCSRs();
-
   /// RegAllocHints - This vector records register allocation hints for
   /// virtual registers. For each virtual register, it keeps a pair of hint
   /// type and hints vector making up the allocation hints. Only the first
@@ -100,7 +98,7 @@ private:
   /// first member of the pair being non-zero. If the hinted register is
   /// virtual, it means the allocator should prefer the physical register
   /// allocated to it if any.
-  IndexedMap<std::pair<unsigned, SmallVector<unsigned, 4>>,
+  IndexedMap<std::pair<Register, SmallVector<Register, 4>>,
              VirtReg2IndexFunctor> RegAllocHints;
 
   /// PhysRegUseDefLists - This is an array of the head of the use/def list for
@@ -233,17 +231,12 @@ public:
 
   /// Disables the register from the list of CSRs.
   /// I.e. the register will not appear as part of the CSR mask.
-  /// \see UpdatedCSRs.
-  void disableCalleeSavedRegister(Register Reg);
-
-  /// Enables the register from the list of CSRs.
-  /// I.e. the register will appear as part of the CSR mask.
-  /// \see UpdatedCSRs.
-  void enableCalleeSavedRegister(Register Reg);
+  /// \see UpdatedCalleeSavedRegs.
+  void disableCalleeSavedRegister(MCRegister Reg);
 
   /// Returns list of callee saved registers.
   /// The function returns the updated CSR list (after taking into account
-  /// registers that are enabled/disabled from the CSR list).
+  /// registers that are disabled from the CSR list).
   const MCPhysReg *getCalleeSavedRegs() const;
 
   /// Sets the updated Callee Saved Registers list.
@@ -449,10 +442,20 @@ public:
   /// Return true if there is exactly one operand defining the specified
   /// register.
   bool hasOneDef(Register RegNo) const {
-    def_iterator DI = def_begin(RegNo);
-    if (DI == def_end())
-      return false;
-    return ++DI == def_end();
+    return hasSingleElement(def_operands(RegNo));
+  }
+
+  /// Returns the defining operand if there is exactly one operand defining the
+  /// specified register, otherwise nullptr.
+  MachineOperand *getOneDef(Register Reg) const {
+    def_iterator DI = def_begin(Reg);
+    if (DI == def_end()) // No defs.
+      return nullptr;
+
+    def_iterator OneDef = DI;
+    if (++DI == def_end())
+      return &*OneDef;
+    return nullptr; // Multiple defs.
   }
 
   /// use_iterator/use_begin/use_end - Walk all uses of the specified register.
@@ -505,10 +508,7 @@ public:
   /// hasOneUse - Return true if there is exactly one instruction using the
   /// specified register.
   bool hasOneUse(Register RegNo) const {
-    use_iterator UI = use_begin(RegNo);
-    if (UI == use_end())
-      return false;
-    return ++UI == use_end();
+    return hasSingleElement(use_operands(RegNo));
   }
 
   /// use_nodbg_iterator/use_nodbg_begin/use_nodbg_end - Walk all uses of the
@@ -619,14 +619,10 @@ public:
   /// function. Writing to a constant register has no effect.
   bool isConstantPhysReg(MCRegister PhysReg) const;
 
-  /// Returns true if either isConstantPhysReg or TRI->isCallerPreservedPhysReg
-  /// returns true. This is a utility member function.
-  bool isCallerPreservedOrConstPhysReg(MCRegister PhysReg) const;
-
   /// Get an iterator over the pressure sets affected by the given physical or
   /// virtual register. If RegUnit is physical, it must be a register unit (from
   /// MCRegUnitIterator).
-  PSetIterator getPressureSets(unsigned RegUnit) const;
+  PSetIterator getPressureSets(Register RegUnit) const;
 
   //===--------------------------------------------------------------------===//
   // Virtual Register Info
@@ -755,7 +751,7 @@ public:
   /// temporarily while constructing machine instructions. Most operations are
   /// undefined on an incomplete register until one of setRegClass(),
   /// setRegBank() or setSize() has been called on it.
-  unsigned createIncompleteVirtualRegister(StringRef Name = "");
+  Register createIncompleteVirtualRegister(StringRef Name = "");
 
   /// getNumVirtRegs - Return the number of virtual registers created.
   unsigned getNumVirtRegs() const { return VRegInfo.size(); }
@@ -767,7 +763,7 @@ public:
   /// specified virtual register. This is typically used by target, and in case
   /// of an earlier hint it will be overwritten.
   void setRegAllocationHint(Register VReg, unsigned Type, Register PrefReg) {
-    assert(Register::isVirtualRegister(VReg));
+    assert(VReg.isVirtual());
     RegAllocHints[VReg].first  = Type;
     RegAllocHints[VReg].second.clear();
     RegAllocHints[VReg].second.push_back(PrefReg);
@@ -786,8 +782,8 @@ public:
     setRegAllocationHint(VReg, /*Type=*/0, PrefReg);
   }
 
-  void clearSimpleHint(unsigned VReg) {
-    assert (RegAllocHints[VReg].first == 0 &&
+  void clearSimpleHint(Register VReg) {
+    assert (!RegAllocHints[VReg].first &&
             "Expected to clear a non-target hint!");
     RegAllocHints[VReg].second.clear();
   }
@@ -795,12 +791,12 @@ public:
   /// getRegAllocationHint - Return the register allocation hint for the
   /// specified virtual register. If there are many hints, this returns the
   /// one with the greatest weight.
-  std::pair<unsigned, unsigned>
+  std::pair<Register, Register>
   getRegAllocationHint(Register VReg) const {
     assert(VReg.isVirtual());
-    unsigned BestHint = (RegAllocHints[VReg.id()].second.size() ?
-                         RegAllocHints[VReg.id()].second[0] : 0);
-    return std::pair<unsigned, unsigned>(RegAllocHints[VReg.id()].first,
+    Register BestHint = (RegAllocHints[VReg.id()].second.size() ?
+                         RegAllocHints[VReg.id()].second[0] : Register());
+    return std::pair<Register, Register>(RegAllocHints[VReg.id()].first,
                                          BestHint);
   }
 
@@ -808,15 +804,15 @@ public:
   /// a target independent hint.
   Register getSimpleHint(Register VReg) const {
     assert(VReg.isVirtual());
-    std::pair<unsigned, unsigned> Hint = getRegAllocationHint(VReg);
-    return Hint.first ? 0 : Hint.second;
+    std::pair<Register, Register> Hint = getRegAllocationHint(VReg);
+    return Hint.first ? Register() : Hint.second;
   }
 
   /// getRegAllocationHints - Return a reference to the vector of all
   /// register allocation hints for VReg.
-  const std::pair<unsigned, SmallVector<unsigned, 4>>
-  &getRegAllocationHints(unsigned VReg) const {
-    assert(Register::isVirtualRegister(VReg));
+  const std::pair<Register, SmallVector<Register, 4>>
+  &getRegAllocationHints(Register VReg) const {
+    assert(VReg.isVirtual());
     return RegAllocHints[VReg];
   }
 
@@ -883,7 +879,7 @@ public:
   /// canReserveReg - Returns true if PhysReg can be used as a reserved
   /// register.  Any register can be reserved before freezeReservedRegs() is
   /// called.
-  bool canReserveReg(unsigned PhysReg) const {
+  bool canReserveReg(MCRegister PhysReg) const {
     return !reservedRegsFrozen() || ReservedRegs.test(PhysReg);
   }
 
@@ -901,7 +897,7 @@ public:
   ///
   /// Reserved registers may belong to an allocatable register class, but the
   /// target has explicitly requested that they are not used.
-  bool isReserved(Register PhysReg) const {
+  bool isReserved(MCRegister PhysReg) const {
     return getReservedRegs().test(PhysReg.id());
   }
 
@@ -919,7 +915,7 @@ public:
   /// Allocatable registers may show up in the allocation order of some virtual
   /// register, so a register allocator needs to track its liveness and
   /// availability.
-  bool isAllocatable(unsigned PhysReg) const {
+  bool isAllocatable(MCRegister PhysReg) const {
     return getTargetRegisterInfo()->isInAllocatableClass(PhysReg) &&
       !isReserved(PhysReg);
   }
@@ -950,11 +946,11 @@ public:
 
   /// getLiveInPhysReg - If VReg is a live-in virtual register, return the
   /// corresponding live-in physical register.
-  unsigned getLiveInPhysReg(Register VReg) const;
+  MCRegister getLiveInPhysReg(Register VReg) const;
 
   /// getLiveInVirtReg - If PReg is a live-in physical register, return the
   /// corresponding live-in physical register.
-  unsigned getLiveInVirtReg(MCRegister PReg) const;
+  Register getLiveInVirtReg(MCRegister PReg) const;
 
   /// EmitLiveInCopies - Emit copies to initialize livein virtual registers
   /// into the given entry block.
@@ -972,10 +968,10 @@ public:
   /// returns defs.  If neither are true then you are silly and it always
   /// returns end().  If SkipDebug is true it skips uses marked Debug
   /// when incrementing.
-  template<bool ReturnUses, bool ReturnDefs, bool SkipDebug,
-           bool ByOperand, bool ByInstr, bool ByBundle>
-  class defusechain_iterator
-    : public std::iterator<std::forward_iterator_tag, MachineInstr, ptrdiff_t> {
+  template <bool ReturnUses, bool ReturnDefs, bool SkipDebug, bool ByOperand,
+            bool ByInstr, bool ByBundle>
+  class defusechain_iterator : public std::iterator<std::forward_iterator_tag,
+                                                    MachineOperand, ptrdiff_t> {
     friend class MachineRegisterInfo;
 
     MachineOperand *Op = nullptr;
@@ -1012,10 +1008,10 @@ public:
     }
 
   public:
-    using reference = std::iterator<std::forward_iterator_tag,
-                                    MachineInstr, ptrdiff_t>::reference;
-    using pointer = std::iterator<std::forward_iterator_tag,
-                                  MachineInstr, ptrdiff_t>::pointer;
+    using reference = std::iterator<std::forward_iterator_tag, MachineOperand,
+                                    ptrdiff_t>::reference;
+    using pointer = std::iterator<std::forward_iterator_tag, MachineOperand,
+                                  ptrdiff_t>::pointer;
 
     defusechain_iterator() = default;
 
@@ -1181,14 +1177,13 @@ class PSetIterator {
 public:
   PSetIterator() = default;
 
-  PSetIterator(unsigned RegUnit, const MachineRegisterInfo *MRI) {
+  PSetIterator(Register RegUnit, const MachineRegisterInfo *MRI) {
     const TargetRegisterInfo *TRI = MRI->getTargetRegisterInfo();
-    if (Register::isVirtualRegister(RegUnit)) {
+    if (RegUnit.isVirtual()) {
       const TargetRegisterClass *RC = MRI->getRegClass(RegUnit);
       PSet = TRI->getRegClassPressureSets(RC);
       Weight = TRI->getRegClassWeight(RC).RegWeight;
-    }
-    else {
+    } else {
       PSet = TRI->getRegUnitPressureSets(RegUnit);
       Weight = TRI->getRegUnitWeight(RegUnit);
     }
@@ -1210,8 +1205,8 @@ public:
   }
 };
 
-inline PSetIterator MachineRegisterInfo::
-getPressureSets(unsigned RegUnit) const {
+inline PSetIterator
+MachineRegisterInfo::getPressureSets(Register RegUnit) const {
   return PSetIterator(RegUnit, this);
 }
 

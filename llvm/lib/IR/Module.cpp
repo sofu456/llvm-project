@@ -33,6 +33,7 @@
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/ModuleSummaryIndex.h"
 #include "llvm/IR/SymbolTableListTraits.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/TypeFinder.h"
@@ -283,6 +284,20 @@ bool Module::isValidModFlagBehavior(Metadata *MD, ModFlagBehavior &MFB) {
   return false;
 }
 
+bool Module::isValidModuleFlag(const MDNode &ModFlag, ModFlagBehavior &MFB,
+                               MDString *&Key, Metadata *&Val) {
+  if (ModFlag.getNumOperands() < 3)
+    return false;
+  if (!isValidModFlagBehavior(ModFlag.getOperand(0), MFB))
+    return false;
+  MDString *K = dyn_cast_or_null<MDString>(ModFlag.getOperand(1));
+  if (!K)
+    return false;
+  Key = K;
+  Val = ModFlag.getOperand(2);
+  return true;
+}
+
 /// getModuleFlagsMetadata - Returns the module flags in the provided vector.
 void Module::
 getModuleFlagsMetadata(SmallVectorImpl<ModuleFlagEntry> &Flags) const {
@@ -291,13 +306,11 @@ getModuleFlagsMetadata(SmallVectorImpl<ModuleFlagEntry> &Flags) const {
 
   for (const MDNode *Flag : ModFlags->operands()) {
     ModFlagBehavior MFB;
-    if (Flag->getNumOperands() >= 3 &&
-        isValidModFlagBehavior(Flag->getOperand(0), MFB) &&
-        dyn_cast_or_null<MDString>(Flag->getOperand(1))) {
+    MDString *Key = nullptr;
+    Metadata *Val = nullptr;
+    if (isValidModuleFlag(*Flag, MFB, Key, Val)) {
       // Check the operands of the MDNode before accessing the operands.
       // The verifier will actually catch these failures.
-      MDString *Key = cast<MDString>(Flag->getOperand(1));
-      Metadata *Val = Flag->getOperand(2);
       Flags.push_back(ModuleFlagEntry(MFB, Key, Val));
     }
   }
@@ -356,6 +369,23 @@ void Module::addModuleFlag(MDNode *Node) {
          isa<MDString>(Node->getOperand(1)) &&
          "Invalid operand types for module flag!");
   getOrInsertModuleFlagsMetadata()->addOperand(Node);
+}
+
+void Module::setModuleFlag(ModFlagBehavior Behavior, StringRef Key,
+                           Metadata *Val) {
+  NamedMDNode *ModFlags = getOrInsertModuleFlagsMetadata();
+  // Replace the flag if it already exists.
+  for (unsigned I = 0, E = ModFlags->getNumOperands(); I != E; ++I) {
+    MDNode *Flag = ModFlags->getOperand(I);
+    ModFlagBehavior MFB;
+    MDString *K = nullptr;
+    Metadata *V = nullptr;
+    if (isValidModuleFlag(*Flag, MFB, K, V) && K->getString() == Key) {
+      Flag->replaceOperandWith(2, Val);
+      return;
+    }
+  }
+  addModuleFlag(Behavior, Key, Val);
 }
 
 void Module::setDataLayout(StringRef Desc) {
@@ -443,6 +473,56 @@ std::vector<StructType *> Module::getIdentifiedStructTypes() const {
   return Ret;
 }
 
+std::string Module::getUniqueIntrinsicName(StringRef BaseName, Intrinsic::ID Id,
+                                           const FunctionType *Proto) {
+  auto Encode = [&BaseName](unsigned Suffix) {
+    return (Twine(BaseName) + "." + Twine(Suffix)).str();
+  };
+
+  {
+    // fast path - the prototype is already known
+    auto UinItInserted = UniquedIntrinsicNames.insert({{Id, Proto}, 0});
+    if (!UinItInserted.second)
+      return Encode(UinItInserted.first->second);
+  }
+
+  // Not known yet. A new entry was created with index 0. Check if there already
+  // exists a matching declaration, or select a new entry.
+
+  // Start looking for names with the current known maximum count (or 0).
+  auto NiidItInserted = CurrentIntrinsicIds.insert({BaseName, 0});
+  unsigned Count = NiidItInserted.first->second;
+
+  // This might be slow if a whole population of intrinsics already existed, but
+  // we cache the values for later usage.
+  std::string NewName;
+  while (true) {
+    NewName = Encode(Count);
+    GlobalValue *F = getNamedValue(NewName);
+    if (!F) {
+      // Reserve this entry for the new proto
+      UniquedIntrinsicNames[{Id, Proto}] = Count;
+      break;
+    }
+
+    // A declaration with this name already exists. Remember it.
+    FunctionType *FT = dyn_cast<FunctionType>(F->getType()->getElementType());
+    auto UinItInserted = UniquedIntrinsicNames.insert({{Id, FT}, Count});
+    if (FT == Proto) {
+      // It was a declaration for our prototype. This entry was allocated in the
+      // beginning. Update the count to match the existing declaration.
+      UinItInserted.first->second = Count;
+      break;
+    }
+
+    ++Count;
+  }
+
+  NiidItInserted.first->second = Count + 1;
+
+  return NewName;
+}
+
 // dropAllReferences() - This function causes all the subelements to "let go"
 // of all references that they are maintaining.  This allows one to 'delete' a
 // whole module at a time, even though there may be circular references... first
@@ -479,6 +559,11 @@ unsigned Module::getDwarfVersion() const {
   return cast<ConstantInt>(Val->getValue())->getZExtValue();
 }
 
+bool Module::isDwarf64() const {
+  auto *Val = cast_or_null<ConstantAsMetadata>(getModuleFlag("DWARF64"));
+  return Val && cast<ConstantInt>(Val->getValue())->isOne();
+}
+
 unsigned Module::getCodeViewFlag() const {
   auto *Val = cast_or_null<ConstantAsMetadata>(getModuleFlag("CodeView"));
   if (!Val)
@@ -486,9 +571,9 @@ unsigned Module::getCodeViewFlag() const {
   return cast<ConstantInt>(Val->getValue())->getZExtValue();
 }
 
-unsigned Module::getInstructionCount() {
+unsigned Module::getInstructionCount() const {
   unsigned NumInstrs = 0;
-  for (Function &F : FunctionList)
+  for (const Function &F : FunctionList)
     NumInstrs += F.getInstructionCount();
   return NumInstrs;
 }
@@ -547,12 +632,12 @@ void Module::setCodeModel(CodeModel::Model CL) {
 
 void Module::setProfileSummary(Metadata *M, ProfileSummary::Kind Kind) {
   if (Kind == ProfileSummary::PSK_CSInstr)
-    addModuleFlag(ModFlagBehavior::Error, "CSProfileSummary", M);
+    setModuleFlag(ModFlagBehavior::Error, "CSProfileSummary", M);
   else
-    addModuleFlag(ModFlagBehavior::Error, "ProfileSummary", M);
+    setModuleFlag(ModFlagBehavior::Error, "ProfileSummary", M);
 }
 
-Metadata *Module::getProfileSummary(bool IsCS) {
+Metadata *Module::getProfileSummary(bool IsCS) const {
   return (IsCS ? getModuleFlag("CSProfileSummary")
                : getModuleFlag("ProfileSummary"));
 }
@@ -624,7 +709,7 @@ VersionTuple Module::getSDKVersion() const {
 }
 
 GlobalVariable *llvm::collectUsedGlobalVariables(
-    const Module &M, SmallPtrSetImpl<GlobalValue *> &Set, bool CompilerUsed) {
+    const Module &M, SmallVectorImpl<GlobalValue *> &Vec, bool CompilerUsed) {
   const char *Name = CompilerUsed ? "llvm.compiler.used" : "llvm.used";
   GlobalVariable *GV = M.getGlobalVariable(Name);
   if (!GV || !GV->hasInitializer())
@@ -633,7 +718,27 @@ GlobalVariable *llvm::collectUsedGlobalVariables(
   const ConstantArray *Init = cast<ConstantArray>(GV->getInitializer());
   for (Value *Op : Init->operands()) {
     GlobalValue *G = cast<GlobalValue>(Op->stripPointerCasts());
-    Set.insert(G);
+    Vec.push_back(G);
   }
   return GV;
+}
+
+void Module::setPartialSampleProfileRatio(const ModuleSummaryIndex &Index) {
+  if (auto *SummaryMD = getProfileSummary(/*IsCS*/ false)) {
+    std::unique_ptr<ProfileSummary> ProfileSummary(
+        ProfileSummary::getFromMD(SummaryMD));
+    if (ProfileSummary) {
+      if (ProfileSummary->getKind() != ProfileSummary::PSK_Sample ||
+          !ProfileSummary->isPartialProfile())
+        return;
+      uint64_t BlockCount = Index.getBlockCount();
+      uint32_t NumCounts = ProfileSummary->getNumCounts();
+      if (!NumCounts)
+        return;
+      double Ratio = (double)BlockCount / NumCounts;
+      ProfileSummary->setPartialProfileRatio(Ratio);
+      setProfileSummary(ProfileSummary->getMD(getContext()),
+                        ProfileSummary::PSK_Sample);
+    }
+  }
 }

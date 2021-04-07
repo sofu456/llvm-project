@@ -1,5 +1,7 @@
-; RUN: llc -mcpu=pwr4 -mtriple=powerpc-ibm-aix-xcoff -verify-machineinstrs < %s | FileCheck %s
-; RUN: llc -mcpu=pwr4 -mtriple=powerpc-ibm-aix-xcoff -verify-machineinstrs -filetype=obj -o %t.o < %s
+; RUN: llc -mcpu=pwr4 -mattr=-altivec -mtriple=powerpc-ibm-aix-xcoff \
+; RUN:     -verify-machineinstrs -data-sections=false -xcoff-traceback-table=false < %s | FileCheck %s
+; RUN: llc -mcpu=pwr4 -mattr=-altivec -mtriple=powerpc-ibm-aix-xcoff \
+; RUN:     -verify-machineinstrs -data-sections=false -xcoff-traceback-table=false -filetype=obj -o %t.o < %s
 ; RUN: llvm-objdump -D %t.o | FileCheck --check-prefix=CHECKOBJ %s
 ; RUN: llvm-readobj -sections %t.o | FileCheck --check-prefix=CHECKSECT %s
 
@@ -31,7 +33,7 @@ entry:
 ;CHECKOBJ-NEXT:      18: 00 01 23 45                   <unknown>
 ;CHECKOBJ-NEXT:      1c: 67 8a bc de                   oris 10, 28, 48350{{[[:space:]] *}}
 ;CHECKOBJ-NEXT: 00000020 <d>:
-;CHECKOBJ-NEXT:      20: 40 14 00 00                   bdnzf   20, .+0
+;CHECKOBJ-NEXT:      20: 40 14 00 00                   bdnzf   20, 0x20
 ;CHECKOBJ-NEXT:      24: 00 00 00 00                   <unknown>{{[[:space:]] *}}
 ;CHECKOBJ-NEXT: 00000028 <foo>:
 ;CHECKOBJ-NEXT:      28: 00 00 00 00                   <unknown>

@@ -9,13 +9,15 @@
 #ifndef LLVM_CLANG_TOOLS_EXTRA_CLANGD_TUSCHEDULER_H
 #define LLVM_CLANG_TOOLS_EXTRA_CLANGD_TUSCHEDULER_H
 
+#include "ASTSignals.h"
 #include "Compiler.h"
 #include "Diagnostics.h"
-#include "Function.h"
 #include "GlobalCompilationDatabase.h"
-#include "Path.h"
-#include "Threading.h"
 #include "index/CanonicalIncludes.h"
+#include "support/Function.h"
+#include "support/MemoryTree.h"
+#include "support/Path.h"
+#include "support/Threading.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringMap.h"
@@ -42,6 +44,8 @@ struct InputsAndPreamble {
   const tooling::CompileCommand &Command;
   // This can be nullptr if no preamble is available.
   const PreambleData *Preamble;
+  // This can be nullptr if no ASTSignals are available.
+  const ASTSignals *Signals;
 };
 
 /// Determines whether diagnostics should be generated for a file snapshot.
@@ -83,18 +87,22 @@ struct DebouncePolicy {
   static DebouncePolicy fixed(clock::duration);
 };
 
-struct TUAction {
-  enum State {
-    Queued,           // The TU is pending in the thread task queue to be built.
-    RunningAction,    // Starting running actions on the TU.
-    BuildingPreamble, // The preamble of the TU is being built.
-    BuildingFile,     // The TU is being built. It is only emitted when building
-                      // the AST for diagnostics in write action (update).
+enum class PreambleAction {
+  Idle,
+  Building,
+};
+
+struct ASTAction {
+  enum Kind {
+    Queued,        // The action is pending in the thread task queue to be run.
+    RunningAction, // Started running actions on the TU.
+    Building,      // The AST is being built.
     Idle, // Indicates the worker thread is idle, and ready to run any upcoming
           // actions.
   };
-  TUAction(State S, llvm::StringRef Name) : S(S), Name(Name) {}
-  State S;
+  ASTAction() = default;
+  ASTAction(Kind K, llvm::StringRef Name) : K(K), Name(Name) {}
+  Kind K = ASTAction::Idle;
   /// The name of the action currently running, e.g. Update, GoToDef, Hover.
   /// Empty if we are in the idle state.
   std::string Name;
@@ -111,7 +119,9 @@ struct TUStatus {
   /// Serialize this to an LSP file status item.
   FileStatus render(PathRef File) const;
 
-  TUAction Action;
+  PreambleAction PreambleActivity = PreambleAction::Idle;
+  ASTAction ASTActivity;
+  /// Stores status of the last build for the translation unit.
   BuildDetails Details;
 };
 
@@ -141,11 +151,11 @@ public:
   /// in this callback (obtained via ParsedAST::getLocalTopLevelDecls) to obtain
   /// optimal performance.
   ///
-  /// When information about the file (diagnostics, syntax highlighting) is
+  /// When information about the file (e.g. diagnostics) is
   /// published to clients, this should be wrapped in Publish, e.g.
   ///   void onMainAST(...) {
-  ///     Highlights = computeHighlights();
-  ///     Publish([&] { notifyHighlights(Path, Highlights); });
+  ///     Diags = renderDiagnostics();
+  ///     Publish([&] { notifyDiagnostics(Path, Diags); });
   ///   }
   /// This guarantees that clients will see results in the correct sequence if
   /// the file is concurrently closed and/or reopened. (The lambda passed to
@@ -185,15 +195,26 @@ public:
 
     /// Determines when to keep idle ASTs in memory for future use.
     ASTRetentionPolicy RetentionPolicy;
+
+    /// Used to create a context that wraps each single operation.
+    /// Typically to inject per-file configuration.
+    /// If the path is empty, context sholud be "generic".
+    std::function<Context(PathRef)> ContextProvider;
   };
 
   TUScheduler(const GlobalCompilationDatabase &CDB, const Options &Opts,
               std::unique_ptr<ParsingCallbacks> ASTCallbacks = nullptr);
   ~TUScheduler();
 
-  /// Returns estimated memory usage for each of the currently open files.
-  /// The order of results is unspecified.
-  std::vector<std::pair<Path, std::size_t>> getUsedBytesPerFile() const;
+  struct FileStats {
+    std::size_t UsedBytesAST = 0;
+    std::size_t UsedBytesPreamble = 0;
+    unsigned PreambleBuilds = 0;
+    unsigned ASTBuilds = 0;
+  };
+  /// Returns resources used for each of the currently open files.
+  /// Results are inherently racy as they measure activity of other threads.
+  llvm::StringMap<FileStats> fileStats() const;
 
   /// Returns a list of files with ASTs currently stored in memory. This method
   /// is not very reliable and is only used for test. E.g., the results will not
@@ -214,11 +235,17 @@ public:
   /// if requested with WantDiags::Auto or WantDiags::Yes.
   void remove(PathRef File);
 
-  /// Returns a snapshot of all file buffer contents, per last update().
-  llvm::StringMap<std::string> getAllFileContents() const;
-
   /// Schedule an async task with no dependencies.
-  void run(llvm::StringRef Name, llvm::unique_function<void()> Action);
+  /// Path may be empty (it is used only to set the Context).
+  void run(llvm::StringRef Name, llvm::StringRef Path,
+           llvm::unique_function<void()> Action);
+
+  /// Similar to run, except the task is expected to be quick.
+  /// This function will not honor AsyncThreadsCount (except
+  /// if threading is disabled with AsyncThreadsCount=0)
+  /// It is intended to run quick tasks that need to run ASAP
+  void runQuick(llvm::StringRef Name, llvm::StringRef Path,
+                llvm::unique_function<void()> Action);
 
   /// Defines how a runWithAST action is implicitly cancelled by other actions.
   enum ASTActionInvalidation {
@@ -245,11 +272,6 @@ public:
 
   /// Controls whether preamble reads wait for the preamble to be up-to-date.
   enum PreambleConsistency {
-    /// The preamble is generated from the current version of the file.
-    /// If the content was recently updated, we will wait until we have a
-    /// preamble that reflects that update.
-    /// This is the slowest option, and may be delayed by other tasks.
-    Consistent,
     /// The preamble may be generated from an older version of the file.
     /// Reading from locations in the preamble may cause files to be re-read.
     /// This gives callers two options:
@@ -285,26 +307,35 @@ public:
   /// Responsible for retaining and rebuilding idle ASTs. An implementation is
   /// an LRU cache.
   class ASTCache;
+  /// Tracks headers included by open files, to get known-good compile commands.
+  class HeaderIncluderCache;
 
   // The file being built/processed in the current thread. This is a hack in
   // order to get the file name into the index implementations. Do not depend on
   // this inside clangd.
   // FIXME: remove this when there is proper index support via build system
   // integration.
+  // FIXME: move to ClangdServer via createProcessingContext.
   static llvm::Optional<llvm::StringRef> getFileBeingProcessedInContext();
 
+  void profile(MemoryTree &MT) const;
+
 private:
+  void runWithSemaphore(llvm::StringRef Name, llvm::StringRef Path,
+                        llvm::unique_function<void()> Action, Semaphore &Sem);
+
   const GlobalCompilationDatabase &CDB;
-  const bool StorePreamblesInMemory;
+  Options Opts;
   std::unique_ptr<ParsingCallbacks> Callbacks; // not nullptr
   Semaphore Barrier;
+  Semaphore QuickRunBarrier;
   llvm::StringMap<std::unique_ptr<FileData>> Files;
   std::unique_ptr<ASTCache> IdleASTs;
+  std::unique_ptr<HeaderIncluderCache> HeaderIncluders;
   // None when running tasks synchronously and non-None when running tasks
   // asynchronously.
   llvm::Optional<AsyncTaskRunner> PreambleTasks;
   llvm::Optional<AsyncTaskRunner> WorkerThreads;
-  DebouncePolicy UpdateDebounce;
 };
 
 } // namespace clangd

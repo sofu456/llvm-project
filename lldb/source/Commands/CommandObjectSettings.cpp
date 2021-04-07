@@ -469,14 +469,13 @@ protected:
   bool DoExecute(Args &command, CommandReturnObject &result) override {
     FileSpec file(m_options.m_filename);
     FileSystem::Instance().Resolve(file);
-    ExecutionContext clean_ctx;
     CommandInterpreterRunOptions options;
     options.SetAddToHistory(false);
     options.SetEchoCommands(false);
     options.SetPrintResults(true);
     options.SetPrintErrors(true);
     options.SetStopOnError(false);
-    m_interpreter.HandleCommandsFromFile(file, &clean_ctx, options, result);
+    m_interpreter.HandleCommandsFromFile(file, options, result);
     return result.Succeeded();
   }
 
@@ -531,10 +530,8 @@ protected:
     if (argc > 0) {
       const bool dump_qualified_name = true;
 
-      // TODO: Convert to StringRef based enumeration.  Requires converting
-      // GetPropertyAtPath first.
-      for (size_t i = 0; i < argc; ++i) {
-        const char *property_path = args.GetArgumentAtIndex(i);
+      for (const Args::ArgEntry &arg : args) {
+        const char *property_path = arg.c_str();
 
         const Property *property =
             GetDebugger().GetValueProperties()->GetPropertyAtPath(

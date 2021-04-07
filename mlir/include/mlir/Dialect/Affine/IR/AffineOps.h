@@ -14,26 +14,29 @@
 #ifndef MLIR_DIALECT_AFFINE_IR_AFFINEOPS_H
 #define MLIR_DIALECT_AFFINE_IR_AFFINEOPS_H
 
+#include "mlir/Dialect/Affine/IR/AffineMemoryOpInterfaces.h"
+#include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpDefinition.h"
-#include "mlir/IR/StandardTypes.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
-#include "mlir/Interfaces/SideEffects.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 
 namespace mlir {
 class AffineApplyOp;
 class AffineBound;
 class AffineDimExpr;
 class AffineValueMap;
-class AffineTerminatorOp;
+class AffineYieldOp;
 class FlatAffineConstraints;
 class OpBuilder;
 
-/// A utility function to check if a value is defined at the top level of a
-/// function. A value of index type defined at the top level is always a valid
-/// symbol.
+/// A utility function to check if a value is defined at the top level of an
+/// op with trait `AffineScope` or is a region argument for such an op. A value
+/// of index type defined at the top level is always a valid symbol for all its
+/// uses.
 bool isTopLevelValue(Value value);
 
 /// AffineDmaStartOp starts a non-blocking DMA operation that transfers data
@@ -73,16 +76,18 @@ bool isTopLevelValue(Value value);
 //   affine.dma_start %src[%i, %j], %dst[%k, %l], %tag[%idx], %num_elements,
 //     %stride, %num_elt_per_stride : ...
 //
-// TODO(mlir-team): add additional operands to allow source and destination
-// striding, and multiple stride levels (possibly using AffineMaps to specify
-// multiple levels of striding).
-// TODO(andydavis) Consider replacing src/dst memref indices with view memrefs.
-class AffineDmaStartOp : public Op<AffineDmaStartOp, OpTrait::VariadicOperands,
-                                   OpTrait::ZeroResult> {
+// TODO: add additional operands to allow source and destination striding, and
+// multiple stride levels (possibly using AffineMaps to specify multiple levels
+// of striding).
+// TODO: Consider replacing src/dst memref indices with view memrefs.
+class AffineDmaStartOp
+    : public Op<AffineDmaStartOp, OpTrait::MemRefsNormalizable,
+                OpTrait::VariadicOperands, OpTrait::ZeroResult,
+                AffineMapAccessInterface::Trait> {
 public:
   using Op::Op;
 
-  static void build(Builder *builder, OperationState &result, Value srcMemRef,
+  static void build(OpBuilder &builder, OperationState &result, Value srcMemRef,
                     AffineMap srcMap, ValueRange srcIndices, Value destMemRef,
                     AffineMap dstMap, ValueRange destIndices, Value tagMemRef,
                     AffineMap tagMap, ValueRange tagIndices, Value numElements,
@@ -103,7 +108,7 @@ public:
   /// Returns the affine map used to access the src memref.
   AffineMap getSrcMap() { return getSrcMapAttr().getValue(); }
   AffineMapAttr getSrcMapAttr() {
-    return getAttr(getSrcMapAttrName()).cast<AffineMapAttr>();
+    return (*this)->getAttr(getSrcMapAttrName()).cast<AffineMapAttr>();
   }
 
   /// Returns the source memref affine map indices for this DMA operation.
@@ -115,7 +120,7 @@ public:
 
   /// Returns the memory space of the src memref.
   unsigned getSrcMemorySpace() {
-    return getSrcMemRef().getType().cast<MemRefType>().getMemorySpace();
+    return getSrcMemRef().getType().cast<MemRefType>().getMemorySpaceAsInt();
   }
 
   /// Returns the operand index of the dst memref.
@@ -136,13 +141,13 @@ public:
 
   /// Returns the memory space of the src memref.
   unsigned getDstMemorySpace() {
-    return getDstMemRef().getType().cast<MemRefType>().getMemorySpace();
+    return getDstMemRef().getType().cast<MemRefType>().getMemorySpaceAsInt();
   }
 
   /// Returns the affine map used to access the dst memref.
   AffineMap getDstMap() { return getDstMapAttr().getValue(); }
   AffineMapAttr getDstMapAttr() {
-    return getAttr(getDstMapAttrName()).cast<AffineMapAttr>();
+    return (*this)->getAttr(getDstMapAttrName()).cast<AffineMapAttr>();
   }
 
   /// Returns the destination memref indices for this DMA operation.
@@ -171,7 +176,7 @@ public:
   /// Returns the affine map used to access the tag memref.
   AffineMap getTagMap() { return getTagMapAttr().getValue(); }
   AffineMapAttr getTagMapAttr() {
-    return getAttr(getTagMapAttrName()).cast<AffineMapAttr>();
+    return (*this)->getAttr(getTagMapAttrName()).cast<AffineMapAttr>();
   }
 
   /// Returns the tag memref indices for this DMA operation.
@@ -187,6 +192,7 @@ public:
                       getTagMap().getNumInputs());
   }
 
+  /// Impelements the AffineMapAccessInterface.
   /// Returns the AffineMapAttr associated with 'memref'.
   NamedAttribute getAffineMapAttrForMemRef(Value memref) {
     if (memref == getSrcMemRef())
@@ -265,12 +271,14 @@ public:
 //   ...
 //   affine.dma_wait %tag[%index], %num_elements : memref<1xi32, 2>
 //
-class AffineDmaWaitOp : public Op<AffineDmaWaitOp, OpTrait::VariadicOperands,
-                                  OpTrait::ZeroResult> {
+class AffineDmaWaitOp
+    : public Op<AffineDmaWaitOp, OpTrait::MemRefsNormalizable,
+                OpTrait::VariadicOperands, OpTrait::ZeroResult,
+                AffineMapAccessInterface::Trait> {
 public:
   using Op::Op;
 
-  static void build(Builder *builder, OperationState &result, Value tagMemRef,
+  static void build(OpBuilder &builder, OperationState &result, Value tagMemRef,
                     AffineMap tagMap, ValueRange tagIndices, Value numElements);
 
   static StringRef getOperationName() { return "affine.dma_wait"; }
@@ -284,7 +292,7 @@ public:
   /// Returns the affine map used to access the tag memref.
   AffineMap getTagMap() { return getTagMapAttr().getValue(); }
   AffineMapAttr getTagMapAttr() {
-    return getAttr(getTagMapAttrName()).cast<AffineMapAttr>();
+    return (*this)->getAttr(getTagMapAttrName()).cast<AffineMapAttr>();
   }
 
   // Returns the tag memref index for this DMA operation.
@@ -298,6 +306,7 @@ public:
     return getTagMemRef().getType().cast<MemRefType>().getRank();
   }
 
+  /// Impelements the AffineMapAccessInterface.
   /// Returns the AffineMapAttr associated with 'memref'.
   NamedAttribute getAffineMapAttrForMemRef(Value memref) {
     assert(memref == getTagMemRef());
@@ -316,152 +325,26 @@ public:
                      SmallVectorImpl<OpFoldResult> &results);
 };
 
-/// The "affine.load" op reads an element from a memref, where the index
-/// for each memref dimension is an affine expression of loop induction
-/// variables and symbols. The output of 'affine.load' is a new value with the
-/// same type as the elements of the memref. An affine expression of loop IVs
-/// and symbols must be specified for each dimension of the memref. The keyword
-/// 'symbol' can be used to indicate SSA identifiers which are symbolic.
-//
-//  Example 1:
-//
-//    %1 = affine.load %0[%i0 + 3, %i1 + 7] : memref<100x100xf32>
-//
-//  Example 2: Uses 'symbol' keyword for symbols '%n' and '%m'.
-//
-//    %1 = affine.load %0[%i0 + symbol(%n), %i1 + symbol(%m)]
-//      : memref<100x100xf32>
-//
-class AffineLoadOp : public Op<AffineLoadOp, OpTrait::OneResult,
-                               OpTrait::AtLeastNOperands<1>::Impl> {
-public:
-  using Op::Op;
-
-  /// Builds an affine load op with the specified map and operands.
-  static void build(Builder *builder, OperationState &result, AffineMap map,
-                    ValueRange operands);
-  /// Builds an affine load op with an identity map and operands.
-  static void build(Builder *builder, OperationState &result, Value memref,
-                    ValueRange indices = {});
-  /// Builds an affine load op with the specified map and its operands.
-  static void build(Builder *builder, OperationState &result, Value memref,
-                    AffineMap map, ValueRange mapOperands);
-
-  /// Returns the operand index of the memref.
-  unsigned getMemRefOperandIndex() { return 0; }
-
-  /// Get memref operand.
-  Value getMemRef() { return getOperand(getMemRefOperandIndex()); }
-  void setMemRef(Value value) { setOperand(getMemRefOperandIndex(), value); }
-  MemRefType getMemRefType() {
-    return getMemRef().getType().cast<MemRefType>();
-  }
-
-  /// Get affine map operands.
-  operand_range getMapOperands() { return llvm::drop_begin(getOperands(), 1); }
-
-  /// Returns the affine map used to index the memref for this operation.
-  AffineMap getAffineMap() { return getAffineMapAttr().getValue(); }
-  AffineMapAttr getAffineMapAttr() {
-    return getAttr(getMapAttrName()).cast<AffineMapAttr>();
-  }
-
-  /// Returns the AffineMapAttr associated with 'memref'.
-  NamedAttribute getAffineMapAttrForMemRef(Value memref) {
-    assert(memref == getMemRef());
-    return {Identifier::get(getMapAttrName(), getContext()),
-            getAffineMapAttr()};
-  }
-
-  static StringRef getMapAttrName() { return "map"; }
-  static StringRef getOperationName() { return "affine.load"; }
-
-  // Hooks to customize behavior of this op.
-  static ParseResult parse(OpAsmParser &parser, OperationState &result);
-  void print(OpAsmPrinter &p);
-  LogicalResult verify();
-  static void getCanonicalizationPatterns(OwningRewritePatternList &results,
-                                          MLIRContext *context);
-  OpFoldResult fold(ArrayRef<Attribute> operands);
-};
-
-/// The "affine.store" op writes an element to a memref, where the index
-/// for each memref dimension is an affine expression of loop induction
-/// variables and symbols. The 'affine.store' op stores a new value which is the
-/// same type as the elements of the memref. An affine expression of loop IVs
-/// and symbols must be specified for each dimension of the memref. The keyword
-/// 'symbol' can be used to indicate SSA identifiers which are symbolic.
-//
-//  Example 1:
-//
-//    affine.store %v0, %0[%i0 + 3, %i1 + 7] : memref<100x100xf32>
-//
-//  Example 2: Uses 'symbol' keyword for symbols '%n' and '%m'.
-//
-//    affine.store %v0, %0[%i0 + symbol(%n), %i1 + symbol(%m)]
-//      : memref<100x100xf32>
-//
-class AffineStoreOp : public Op<AffineStoreOp, OpTrait::ZeroResult,
-                                OpTrait::AtLeastNOperands<1>::Impl> {
-public:
-  using Op::Op;
-
-  /// Builds an affine store operation with the provided indices (identity map).
-  static void build(Builder *builder, OperationState &result,
-                    Value valueToStore, Value memref, ValueRange indices);
-  /// Builds an affine store operation with the specified map and its operands.
-  static void build(Builder *builder, OperationState &result,
-                    Value valueToStore, Value memref, AffineMap map,
-                    ValueRange mapOperands);
-
-  /// Get value to be stored by store operation.
-  Value getValueToStore() { return getOperand(0); }
-
-  /// Returns the operand index of the memref.
-  unsigned getMemRefOperandIndex() { return 1; }
-
-  /// Get memref operand.
-  Value getMemRef() { return getOperand(getMemRefOperandIndex()); }
-  void setMemRef(Value value) { setOperand(getMemRefOperandIndex(), value); }
-
-  MemRefType getMemRefType() {
-    return getMemRef().getType().cast<MemRefType>();
-  }
-
-  /// Get affine map operands.
-  operand_range getMapOperands() { return llvm::drop_begin(getOperands(), 2); }
-
-  /// Returns the affine map used to index the memref for this operation.
-  AffineMap getAffineMap() { return getAffineMapAttr().getValue(); }
-  AffineMapAttr getAffineMapAttr() {
-    return getAttr(getMapAttrName()).cast<AffineMapAttr>();
-  }
-
-  /// Returns the AffineMapAttr associated with 'memref'.
-  NamedAttribute getAffineMapAttrForMemRef(Value memref) {
-    assert(memref == getMemRef());
-    return {Identifier::get(getMapAttrName(), getContext()),
-            getAffineMapAttr()};
-  }
-
-  static StringRef getMapAttrName() { return "map"; }
-  static StringRef getOperationName() { return "affine.store"; }
-
-  // Hooks to customize behavior of this op.
-  static ParseResult parse(OpAsmParser &parser, OperationState &result);
-  void print(OpAsmPrinter &p);
-  LogicalResult verify();
-  static void getCanonicalizationPatterns(OwningRewritePatternList &results,
-                                          MLIRContext *context);
-  LogicalResult fold(ArrayRef<Attribute> cstOperands,
-                     SmallVectorImpl<OpFoldResult> &results);
-};
-
-/// Returns true if the given Value can be used as a dimension id.
+/// Returns true if the given Value can be used as a dimension id in the region
+/// of the closest surrounding op that has the trait `AffineScope`.
 bool isValidDim(Value value);
 
-/// Returns true if the given Value can be used as a symbol.
+/// Returns true if the given Value can be used as a dimension id in `region`,
+/// i.e., for all its uses in `region`.
+bool isValidDim(Value value, Region *region);
+
+/// Returns true if the given value can be used as a symbol in the region of the
+/// closest surrounding op that has the trait `AffineScope`.
 bool isValidSymbol(Value value);
+
+/// Returns true if the given Value can be used as a symbol for `region`, i.e.,
+/// for all its uses in `region`.
+bool isValidSymbol(Value value, Region *region);
+
+/// Parses dimension and symbol list and returns true if parsing failed.
+ParseResult parseDimAndSymbolList(OpAsmParser &parser,
+                                  SmallVectorImpl<Value> &operands,
+                                  unsigned &numDims);
 
 /// Modifies both `map` and `operands` in-place so as to:
 /// 1. drop duplicate operands
@@ -498,7 +381,8 @@ void fullyComposeAffineMapAndOperands(AffineMap *map,
 #define GET_OP_CLASSES
 #include "mlir/Dialect/Affine/IR/AffineOps.h.inc"
 
-/// Returns if the provided value is the induction variable of a AffineForOp.
+/// Returns true if the provided value is the induction variable of a
+/// AffineForOp.
 bool isForInductionVar(Value val);
 
 /// Returns the loop parent of an induction variable. If the provided value is
@@ -509,6 +393,21 @@ AffineForOp getForInductionVarOwner(Value val);
 /// in the output argument `ivs`.
 void extractForInductionVars(ArrayRef<AffineForOp> forInsts,
                              SmallVectorImpl<Value> *ivs);
+
+/// Builds a perfect nest of affine "for" loops, i.e. each loop except the
+/// innermost only contains another loop and a terminator. The loops iterate
+/// from "lbs" to "ubs" with "steps". The body of the innermost loop is
+/// populated by calling "bodyBuilderFn" and providing it with an OpBuilder, a
+/// Location and a list of loop induction variables.
+void buildAffineLoopNest(OpBuilder &builder, Location loc,
+                         ArrayRef<int64_t> lbs, ArrayRef<int64_t> ubs,
+                         ArrayRef<int64_t> steps,
+                         function_ref<void(OpBuilder &, Location, ValueRange)>
+                             bodyBuilderFn = nullptr);
+void buildAffineLoopNest(OpBuilder &builder, Location loc, ValueRange lbs,
+                         ValueRange ubs, ArrayRef<int64_t> steps,
+                         function_ref<void(OpBuilder &, Location, ValueRange)>
+                             bodyBuilderFn = nullptr);
 
 /// AffineBound represents a lower or upper bound in the for operation.
 /// This class does not own the underlying operands. Instead, it refers
@@ -542,81 +441,6 @@ private:
       : op(op), opStart(opStart), opEnd(opEnd), map(map) {}
 
   friend class AffineForOp;
-};
-
-/// An `AffineApplyNormalizer` is a helper class that supports renumbering
-/// operands of AffineApplyOp. This acts as a reindexing map of Value to
-/// positional dims or symbols and allows simplifications such as:
-///
-/// ```mlir
-///    %1 = affine.apply (d0, d1) -> (d0 - d1) (%0, %0)
-/// ```
-///
-/// into:
-///
-/// ```mlir
-///    %1 = affine.apply () -> (0)
-/// ```
-struct AffineApplyNormalizer {
-  AffineApplyNormalizer(AffineMap map, ArrayRef<Value> operands);
-
-  /// Returns the AffineMap resulting from normalization.
-  AffineMap getAffineMap() { return affineMap; }
-
-  SmallVector<Value, 8> getOperands() {
-    SmallVector<Value, 8> res(reorderedDims);
-    res.append(concatenatedSymbols.begin(), concatenatedSymbols.end());
-    return res;
-  }
-
-  unsigned getNumSymbols() { return concatenatedSymbols.size(); }
-  unsigned getNumDims() { return reorderedDims.size(); }
-
-  /// Normalizes 'otherMap' and its operands 'otherOperands' to map to this
-  /// normalizer's coordinate space.
-  void normalize(AffineMap *otherMap, SmallVectorImpl<Value> *otherOperands);
-
-private:
-  /// Helper function to insert `v` into the coordinate system of the current
-  /// AffineApplyNormalizer. Returns the AffineDimExpr with the corresponding
-  /// renumbered position.
-  AffineDimExpr renumberOneDim(Value v);
-
-  /// Given an `other` normalizer, this rewrites `other.affineMap` in the
-  /// coordinate system of the current AffineApplyNormalizer.
-  /// Returns the rewritten AffineMap and updates the dims and symbols of
-  /// `this`.
-  AffineMap renumber(const AffineApplyNormalizer &other);
-
-  /// Maps of Value to position in `affineMap`.
-  DenseMap<Value, unsigned> dimValueToPosition;
-
-  /// Ordered dims and symbols matching positional dims and symbols in
-  /// `affineMap`.
-  SmallVector<Value, 8> reorderedDims;
-  SmallVector<Value, 8> concatenatedSymbols;
-
-  /// The number of symbols in concatenated symbols that belong to the original
-  /// map as opposed to those concatendated during map composition.
-  unsigned numProperSymbols;
-
-  AffineMap affineMap;
-
-  /// Used with RAII to control the depth at which AffineApply are composed
-  /// recursively. Only accepts depth 1 for now to allow a behavior where a
-  /// newly composed AffineApplyOp does not increase the length of the chain of
-  /// AffineApplyOps. Full composition is implemented iteratively on top of
-  /// this behavior.
-  static unsigned &affineApplyDepth() {
-    static thread_local unsigned depth = 0;
-    return depth;
-  }
-  static constexpr unsigned kMaxAffineApplyDepth = 1;
-
-  AffineApplyNormalizer() : numProperSymbols(0) { affineApplyDepth()++; }
-
-public:
-  ~AffineApplyNormalizer() { affineApplyDepth()--; }
 };
 
 } // end namespace mlir

@@ -11,11 +11,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/SPIRV/Passes.h"
-#include "mlir/Dialect/SPIRV/SPIRVDialect.h"
-#include "mlir/Dialect/SPIRV/SPIRVOps.h"
-#include "mlir/Dialect/SPIRV/SPIRVTypes.h"
-#include "mlir/Dialect/SPIRV/TargetAndABI.h"
+#include "PassDetail.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVTypes.h"
+#include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
+#include "mlir/Dialect/SPIRV/Transforms/Passes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Visitors.h"
 #include "llvm/ADT/SetVector.h"
@@ -26,9 +27,7 @@ using namespace mlir;
 namespace {
 /// Pass to deduce minimal version/extension/capability requirements for a
 /// spirv::ModuleOp.
-class UpdateVCEPass final
-    : public OperationPass<UpdateVCEPass, spirv::ModuleOp> {
-private:
+class UpdateVCEPass final : public SPIRVUpdateVCEBase<UpdateVCEPass> {
   void runOnOperation() override;
 };
 } // namespace
@@ -164,21 +163,16 @@ void UpdateVCEPass::runOnOperation() {
   if (walkResult.wasInterrupted())
     return signalPassFailure();
 
-  // TODO(antiagainst): verify that the deduced version is consistent with
+  // TODO: verify that the deduced version is consistent with
   // SPIR-V ops' maximal version requirements.
 
   auto triple = spirv::VerCapExtAttr::get(
       deducedVersion, deducedCapabilities.getArrayRef(),
       deducedExtensions.getArrayRef(), &getContext());
-  module.setAttr(spirv::ModuleOp::getVCETripleAttrName(), triple);
+  module->setAttr(spirv::ModuleOp::getVCETripleAttrName(), triple);
 }
 
-std::unique_ptr<OpPassBase<spirv::ModuleOp>>
+std::unique_ptr<OperationPass<spirv::ModuleOp>>
 mlir::spirv::createUpdateVersionCapabilityExtensionPass() {
   return std::make_unique<UpdateVCEPass>();
 }
-
-static PassRegistration<UpdateVCEPass>
-    pass("spirv-update-vce",
-         "Deduce and attach minimal (version, capabilities, extensions) "
-         "requirements to spv.module ops");

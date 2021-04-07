@@ -1,8 +1,8 @@
 =============================
-Release Notes 11.0 (upcoming)
+Release Notes 13.0 (upcoming)
 =============================
 
-In Polly 11 the following important changes have been incorporated.
+In Polly 13 the following important changes have been incorporated.
 
 .. warning::
 

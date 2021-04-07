@@ -6,7 +6,13 @@
 //
 //===----------------------------------------------------------------------===//
 
-// UNSUPPORTED: c++98, c++03
+// UNSUPPORTED: c++03
+
+// XFAIL: LIBCXX-WINDOWS-FIXME
+
+// The string reported on errors changed, which makes those tests fail when run
+// against already-released libc++'s.
+// XFAIL: with_system_cxx_lib=macosx10.15
 
 // <filesystem>
 

@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/BinaryFormat/Magic.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/AutoUpgrade.h"
@@ -23,6 +24,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Linker/Linker.h"
+#include "llvm/Object/Archive.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
@@ -108,23 +110,27 @@ static cl::opt<bool> PreserveAssemblyUseListOrder(
     cl::desc("Preserve use-list order when writing LLVM assembly."),
     cl::init(false), cl::Hidden);
 
+static cl::opt<bool> NoVerify("disable-verify",
+                              cl::desc("Do not run the verifier"), cl::Hidden);
+
 static ExitOnError ExitOnErr;
 
 // Read the specified bitcode file in and return it. This routine searches the
 // link path for the specified file to try to find it...
 //
 static std::unique_ptr<Module> loadFile(const char *argv0,
-                                        const std::string &FN,
+                                        std::unique_ptr<MemoryBuffer> Buffer,
                                         LLVMContext &Context,
                                         bool MaterializeMetadata = true) {
   SMDiagnostic Err;
   if (Verbose)
-    errs() << "Loading '" << FN << "'\n";
+    errs() << "Loading '" << Buffer->getBufferIdentifier() << "'\n";
   std::unique_ptr<Module> Result;
   if (DisableLazyLoad)
-    Result = parseIRFile(FN, Err, Context);
+    Result = parseIR(*Buffer, Err, Context);
   else
-    Result = getLazyIRFileModule(FN, Err, Context, !MaterializeMetadata);
+    Result =
+        getLazyIRModule(std::move(Buffer), Err, Context, !MaterializeMetadata);
 
   if (!Result) {
     Err.print(argv0, errs());
@@ -136,6 +142,74 @@ static std::unique_ptr<Module> loadFile(const char *argv0,
     UpgradeDebugInfo(*Result);
   }
 
+  return Result;
+}
+
+static std::unique_ptr<Module> loadArFile(const char *Argv0,
+                                          std::unique_ptr<MemoryBuffer> Buffer,
+                                          LLVMContext &Context) {
+  std::unique_ptr<Module> Result(new Module("ArchiveModule", Context));
+  StringRef ArchiveName = Buffer->getBufferIdentifier();
+  if (Verbose)
+    errs() << "Reading library archive file '" << ArchiveName
+           << "' to memory\n";
+  Error Err = Error::success();
+  object::Archive Archive(*Buffer, Err);
+  ExitOnErr(std::move(Err));
+  Linker L(*Result);
+  for (const object::Archive::Child &C : Archive.children(Err)) {
+    Expected<StringRef> Ename = C.getName();
+    if (Error E = Ename.takeError()) {
+      errs() << Argv0 << ": ";
+      WithColor::error()
+          << " failed to read name of archive member"
+          << ArchiveName << "'\n";
+      return nullptr;
+    }
+    std::string ChildName = Ename.get().str();
+    if (Verbose)
+      errs() << "Parsing member '" << ChildName
+             << "' of archive library to module.\n";
+    SMDiagnostic ParseErr;
+    Expected<MemoryBufferRef> MemBuf = C.getMemoryBufferRef();
+    if (Error E = MemBuf.takeError()) {
+      errs() << Argv0 << ": ";
+      WithColor::error() << " loading memory for member '" << ChildName
+                         << "' of archive library failed'" << ArchiveName
+                         << "'\n";
+      return nullptr;
+    };
+
+    if (!isBitcode(reinterpret_cast<const unsigned char *>
+                   (MemBuf.get().getBufferStart()),
+                   reinterpret_cast<const unsigned char *>
+                   (MemBuf.get().getBufferEnd()))) {
+      errs() << Argv0 << ": ";
+      WithColor::error() << "  member of archive is not a bitcode file: '"
+                         << ChildName << "'\n";
+      return nullptr;
+    }
+
+    std::unique_ptr<Module> M;
+    if (DisableLazyLoad)
+      M = parseIR(MemBuf.get(), ParseErr, Context);
+    else
+      M = getLazyIRModule(MemoryBuffer::getMemBuffer(MemBuf.get(), false),
+                          ParseErr, Context);
+
+    if (!M.get()) {
+      errs() << Argv0 << ": ";
+      WithColor::error() << " parsing member '" << ChildName
+                         << "' of archive library failed'" << ArchiveName
+                         << "'\n";
+      return nullptr;
+    }
+    if (Verbose)
+      errs() << "Linking member '" << ChildName << "' of archive library.\n";
+    if (L.linkInModule(std::move(M)))
+      return nullptr;
+  } // end for each child
+  ExitOnErr(std::move(Err));
   return Result;
 }
 
@@ -175,8 +249,10 @@ public:
 Module &ModuleLazyLoaderCache::operator()(const char *argv0,
                                           const std::string &Identifier) {
   auto &Module = ModuleMap[Identifier];
-  if (!Module)
+  if (!Module) {
     Module = createLazyModule(argv0, Identifier);
+    assert(Module && "Failed to create lazy module!");
+  }
   return *Module;
 }
 } // anonymous namespace
@@ -219,7 +295,9 @@ static bool importFunctions(const char *argv0, Module &DestModule) {
 
   auto ModuleLoader = [&DestModule](const char *argv0,
                                     const std::string &Identifier) {
-    return loadFile(argv0, Identifier, DestModule.getContext(), false);
+    std::unique_ptr<MemoryBuffer> Buffer =
+        ExitOnErr(errorOrToExpected(MemoryBuffer::getFileOrSTDIN(Identifier)));
+    return loadFile(argv0, std::move(Buffer), DestModule.getContext(), false);
   };
 
   ModuleLazyLoaderCache ModuleLoaderCache(ModuleLoader);
@@ -236,7 +314,7 @@ static bool importFunctions(const char *argv0, Module &DestModule) {
     // Load the specified source module.
     auto &SrcModule = ModuleLoaderCache(argv0, FileName);
 
-    if (verifyModule(SrcModule, &errs())) {
+    if (!NoVerify && verifyModule(SrcModule, &errs())) {
       errs() << argv0 << ": " << FileName;
       WithColor::error() << "input module is broken!\n";
       return false;
@@ -266,7 +344,8 @@ static bool importFunctions(const char *argv0, Module &DestModule) {
   auto CachedModuleLoader = [&](StringRef Identifier) {
     return ModuleLoaderCache.takeModule(std::string(Identifier));
   };
-  FunctionImporter Importer(*Index, CachedModuleLoader);
+  FunctionImporter Importer(*Index, CachedModuleLoader,
+                            /*ClearDSOLocalOnDeclarations=*/false);
   ExitOnErr(Importer.importFunctions(DestModule, ImportList));
 
   return true;
@@ -280,7 +359,13 @@ static bool linkFiles(const char *argv0, LLVMContext &Context, Linker &L,
   // Similar to some flags, internalization doesn't apply to the first file.
   bool InternalizeLinkedSymbols = false;
   for (const auto &File : Files) {
-    std::unique_ptr<Module> M = loadFile(argv0, File, Context);
+    std::unique_ptr<MemoryBuffer> Buffer =
+        ExitOnErr(errorOrToExpected(MemoryBuffer::getFileOrSTDIN(File)));
+
+    std::unique_ptr<Module> M =
+        identify_magic(Buffer->getBuffer()) == file_magic::archive
+            ? loadArFile(argv0, std::move(Buffer), Context)
+            : loadFile(argv0, std::move(Buffer), Context);
     if (!M.get()) {
       errs() << argv0 << ": ";
       WithColor::error() << " loading file '" << File << "'\n";
@@ -290,7 +375,7 @@ static bool linkFiles(const char *argv0, LLVMContext &Context, Linker &L,
     // Note that when ODR merging types cannot verify input files in here When
     // doing that debug metadata in the src module might already be pointing to
     // the destination.
-    if (DisableDITypeMap && verifyModule(*M, &errs())) {
+    if (DisableDITypeMap && !NoVerify && verifyModule(*M, &errs())) {
       errs() << argv0 << ": " << File << ": ";
       WithColor::error() << "input module is broken!\n";
       return false;
@@ -313,7 +398,8 @@ static bool linkFiles(const char *argv0, LLVMContext &Context, Linker &L,
       }
 
       // Promotion
-      if (renameModuleForThinLTO(*M, *Index))
+      if (renameModuleForThinLTO(*M, *Index,
+                                 /*ClearDSOLocalOnDeclarations=*/false))
         return true;
     }
 
@@ -381,13 +467,15 @@ int main(int argc, char **argv) {
     errs() << "Here's the assembly:\n" << *Composite;
 
   std::error_code EC;
-  ToolOutputFile Out(OutputFilename, EC, sys::fs::OF_None);
+  ToolOutputFile Out(OutputFilename, EC,
+                     OutputAssembly ? sys::fs::OF_TextWithCRLF
+                                    : sys::fs::OF_None);
   if (EC) {
     WithColor::error() << EC.message() << '\n';
     return 1;
   }
 
-  if (verifyModule(*Composite, &errs())) {
+  if (!NoVerify && verifyModule(*Composite, &errs())) {
     errs() << argv[0] << ": ";
     WithColor::error() << "linked module is broken!\n";
     return 1;
@@ -397,7 +485,7 @@ int main(int argc, char **argv) {
     errs() << "Writing bitcode...\n";
   if (OutputAssembly) {
     Composite->print(Out.os(), nullptr, PreserveAssemblyUseListOrder);
-  } else if (Force || !CheckBitcodeOutputToConsole(Out.os(), true))
+  } else if (Force || !CheckBitcodeOutputToConsole(Out.os()))
     WriteBitcodeToFile(*Composite, Out.os(), PreserveBitcodeUseListOrder);
 
   // Declare success.

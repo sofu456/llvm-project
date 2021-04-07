@@ -12,21 +12,15 @@
 #include "ClangTidyOptions.h"
 #include "ClangTidyProfiling.h"
 #include "clang/Basic/Diagnostic.h"
-#include "clang/Basic/SourceManager.h"
 #include "clang/Tooling/Core/Diagnostic.h"
-#include "clang/Tooling/Refactoring.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/Support/Timer.h"
-
-namespace llvm {
-class Regex;
-}
+#include "llvm/Support/Regex.h"
 
 namespace clang {
 
 class ASTContext;
 class CompilerInstance;
+class SourceManager;
 namespace ast_matchers {
 class MatchFinder;
 }
@@ -48,6 +42,7 @@ struct ClangTidyError : tooling::Diagnostic {
                  bool IsWarningAsError);
 
   bool IsWarningAsError;
+  std::vector<std::string> EnabledDiagnosticAliases;
 };
 
 /// Contains displayed and ignored diagnostic counters for a ClangTidy
@@ -100,6 +95,14 @@ public:
   DiagnosticBuilder diag(StringRef CheckName, SourceLocation Loc,
                          StringRef Message,
                          DiagnosticIDs::Level Level = DiagnosticIDs::Warning);
+
+  DiagnosticBuilder diag(StringRef CheckName, StringRef Message,
+                         DiagnosticIDs::Level Level = DiagnosticIDs::Warning);
+
+  /// Report any errors to do with reading the configuration using this method.
+  DiagnosticBuilder
+  configurationDiag(StringRef Message,
+                    DiagnosticIDs::Level Level = DiagnosticIDs::Warning);
 
   /// Sets the \c SourceManager of the used \c DiagnosticsEngine.
   ///
@@ -216,15 +219,19 @@ private:
 /// This does not handle suppression of notes following a suppressed diagnostic;
 /// that is left to the caller is it requires maintaining state in between calls
 /// to this function.
-/// The `CheckMacroExpansion` parameter determines whether the function should
-/// handle the case where the diagnostic is inside a macro expansion. A degree
-/// of control over this is needed because handling this case can require
-/// examining source files other than the one in which the diagnostic is
-/// located, and in some use cases we cannot rely on such other files being
-/// mapped in the SourceMapper.
+/// If `AllowIO` is false, the function does not attempt to read source files
+/// from disk which are not already mapped into memory; such files are treated
+/// as not containing a suppression comment.
 bool shouldSuppressDiagnostic(DiagnosticsEngine::Level DiagLevel,
                               const Diagnostic &Info, ClangTidyContext &Context,
-                              bool CheckMacroExpansion = true);
+                              bool AllowIO = true);
+
+/// Gets the Fix attached to \p Diagnostic.
+/// If there isn't a Fix attached to the diagnostic and \p AnyFix is true, Check
+/// to see if exactly one note has a Fix and return it. Otherwise return
+/// nullptr.
+const llvm::StringMap<tooling::Replacements> *
+getFixIt(const tooling::Diagnostic &Diagnostic, bool AnyFix);
 
 /// A diagnostic consumer that turns each \c Diagnostic into a
 /// \c SourceManager-independent \c ClangTidyError.
@@ -235,7 +242,8 @@ class ClangTidyDiagnosticConsumer : public DiagnosticConsumer {
 public:
   ClangTidyDiagnosticConsumer(ClangTidyContext &Ctx,
                               DiagnosticsEngine *ExternalDiagEngine = nullptr,
-                              bool RemoveIncompatibleErrors = true);
+                              bool RemoveIncompatibleErrors = true,
+                              bool GetFixesFromNotes = false);
 
   // FIXME: The concept of converting between FixItHints and Replacements is
   // more generic and should be pulled out into a more useful Diagnostics
@@ -249,6 +257,7 @@ public:
 private:
   void finalizeLastError();
   void removeIncompatibleErrors();
+  void removeDuplicatedDiagnosticsOfAliasCheckers();
 
   /// Returns the \c HeaderFilter constructed for the options set in the
   /// context.
@@ -264,6 +273,7 @@ private:
   ClangTidyContext &Context;
   DiagnosticsEngine *ExternalDiagEngine;
   bool RemoveIncompatibleErrors;
+  bool GetFixesFromNotes;
   std::vector<ClangTidyError> Errors;
   std::unique_ptr<llvm::Regex> HeaderFilter;
   bool LastErrorRelatesToUserCode;

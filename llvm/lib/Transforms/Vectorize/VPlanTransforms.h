@@ -19,15 +19,13 @@
 
 namespace llvm {
 
-class VPlanTransforms {
-
-public:
+struct VPlanTransforms {
   /// Replaces the VPInstructions in \p Plan with corresponding
   /// widen recipes.
   static void VPInstructionsToVPRecipes(
       Loop *OrigLoop, VPlanPtr &Plan,
       LoopVectorizationLegality::InductionList &Inductions,
-      SmallPtrSetImpl<Instruction *> &DeadInstructions);
+      SmallPtrSetImpl<Instruction *> &DeadInstructions, ScalarEvolution &SE);
 };
 
 } // namespace llvm

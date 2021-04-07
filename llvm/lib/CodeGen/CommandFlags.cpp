@@ -13,6 +13,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/CodeGen/CommandFlags.h"
+#include "llvm/IR/Module.h"
+#include "llvm/MC/SubtargetFeature.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Host.h"
 
 using namespace llvm;
 
@@ -54,7 +58,9 @@ CGOPT(bool, EnableNoInfsFPMath)
 CGOPT(bool, EnableNoNaNsFPMath)
 CGOPT(bool, EnableNoSignedZerosFPMath)
 CGOPT(bool, EnableNoTrappingFPMath)
-CGOPT(FPDenormal::DenormalMode, DenormalFPMath)
+CGOPT(bool, EnableAIXExtendedAltivecABI)
+CGOPT(DenormalMode::DenormalModeKind, DenormalFPMath)
+CGOPT(DenormalMode::DenormalModeKind, DenormalFP32Math)
 CGOPT(bool, EnableHonorSignDependentRoundingFPMath)
 CGOPT(FloatABI::ABIType, FloatABIForCalls)
 CGOPT(FPOpFusion::FPOpFusionMode, FuseFPOps)
@@ -69,18 +75,27 @@ CGOPT(bool, UseCtors)
 CGOPT(bool, RelaxELFRelocations)
 CGOPT_EXP(bool, DataSections)
 CGOPT_EXP(bool, FunctionSections)
+CGOPT(bool, IgnoreXCOFFVisibility)
+CGOPT(bool, XCOFFTracebackTable)
 CGOPT(std::string, BBSections)
+CGOPT(std::string, StackProtectorGuard)
+CGOPT(unsigned, StackProtectorGuardOffset)
+CGOPT(std::string, StackProtectorGuardReg)
 CGOPT(unsigned, TLSSize)
 CGOPT(bool, EmulatedTLS)
 CGOPT(bool, UniqueSectionNames)
-CGOPT(bool, UniqueBBSectionNames)
+CGOPT(bool, UniqueBasicBlockSectionNames)
 CGOPT(EABI, EABIVersion)
 CGOPT(DebuggerKind, DebuggerTuningOpt)
 CGOPT(bool, EnableStackSizeSection)
 CGOPT(bool, EnableAddrsig)
 CGOPT(bool, EmitCallSiteInfo)
+CGOPT(bool, EnableMachineFunctionSplitter)
 CGOPT(bool, EnableDebugEntryValues)
+CGOPT(bool, PseudoProbeForProfiling)
+CGOPT(bool, ValueTrackingVariableLocations)
 CGOPT(bool, ForceDwarfFrameSection)
+CGOPT(bool, XRayOmitFunctionIndex)
 
 codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
 #define CGBINDOPT(NAME)                                                        \
@@ -212,19 +227,29 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
       cl::init(false));
   CGBINDOPT(EnableNoTrappingFPMath);
 
-  static cl::opt<FPDenormal::DenormalMode> DenormalFPMath(
-      "denormal-fp-math",
-      cl::desc(
-          "Select which denormal numbers the code is permitted to require"),
-      cl::init(FPDenormal::IEEE),
-      cl::values(
-          clEnumValN(FPDenormal::IEEE, "ieee", "IEEE 754 denormal numbers"),
-          clEnumValN(FPDenormal::PreserveSign, "preserve-sign",
-                     "the sign of a  flushed-to-zero number is preserved "
-                     "in the sign of 0"),
-          clEnumValN(FPDenormal::PositiveZero, "positive-zero",
-                     "denormals are flushed to positive zero")));
+  static const auto DenormFlagEnumOptions =
+  cl::values(clEnumValN(DenormalMode::IEEE, "ieee",
+                        "IEEE 754 denormal numbers"),
+             clEnumValN(DenormalMode::PreserveSign, "preserve-sign",
+                        "the sign of a  flushed-to-zero number is preserved "
+                        "in the sign of 0"),
+             clEnumValN(DenormalMode::PositiveZero, "positive-zero",
+                        "denormals are flushed to positive zero"));
+
+  // FIXME: Doesn't have way to specify separate input and output modes.
+  static cl::opt<DenormalMode::DenormalModeKind> DenormalFPMath(
+    "denormal-fp-math",
+    cl::desc("Select which denormal numbers the code is permitted to require"),
+    cl::init(DenormalMode::IEEE),
+    DenormFlagEnumOptions);
   CGBINDOPT(DenormalFPMath);
+
+  static cl::opt<DenormalMode::DenormalModeKind> DenormalFP32Math(
+    "denormal-fp-math-f32",
+    cl::desc("Select which denormal numbers the code is permitted to require for float"),
+    cl::init(DenormalMode::Invalid),
+    DenormFlagEnumOptions);
+  CGBINDOPT(DenormalFP32Math);
 
   static cl::opt<bool> EnableHonorSignDependentRoundingFPMath(
       "enable-sign-dependent-rounding-fp-math", cl::Hidden,
@@ -259,6 +284,11 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
       cl::desc("Don't place zero-initialized symbols into bss section"),
       cl::init(false));
   CGBINDOPT(DontPlaceZerosInBSS);
+
+  static cl::opt<bool> EnableAIXExtendedAltivecABI(
+      "vec-extabi", cl::desc("Enable the AIX Extended Altivec ABI."),
+      cl::init(false));
+  CGBINDOPT(EnableAIXExtendedAltivecABI);
 
   static cl::opt<bool> EnableGuaranteedTailCallOpt(
       "tailcallopt",
@@ -315,12 +345,39 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
       cl::init(false));
   CGBINDOPT(FunctionSections);
 
+  static cl::opt<bool> IgnoreXCOFFVisibility(
+      "ignore-xcoff-visibility",
+      cl::desc("Not emit the visibility attribute for asm in AIX OS or give "
+               "all symbols 'unspecified' visibility in XCOFF object file"),
+      cl::init(false));
+  CGBINDOPT(IgnoreXCOFFVisibility);
+
+  static cl::opt<bool> XCOFFTracebackTable(
+      "xcoff-traceback-table", cl::desc("Emit the XCOFF traceback table"),
+      cl::init(true));
+  CGBINDOPT(XCOFFTracebackTable);
+
   static cl::opt<std::string> BBSections(
-      "basicblock-sections",
+      "basic-block-sections",
       cl::desc("Emit basic blocks into separate sections"),
       cl::value_desc("all | <function list (file)> | labels | none"),
       cl::init("none"));
   CGBINDOPT(BBSections);
+
+  static cl::opt<std::string> StackProtectorGuard(
+      "stack-protector-guard", cl::desc("Stack protector guard mode"),
+      cl::init("none"));
+  CGBINDOPT(StackProtectorGuard);
+
+  static cl::opt<std::string> StackProtectorGuardReg(
+      "stack-protector-guard-reg", cl::desc("Stack protector guard register"),
+      cl::init("none"));
+  CGBINDOPT(StackProtectorGuardReg);
+
+  static cl::opt<unsigned> StackProtectorGuardOffset(
+      "stack-protector-guard-offset", cl::desc("Stack protector guard offset"),
+      cl::init((unsigned)-1));
+  CGBINDOPT(StackProtectorGuardOffset);
 
   static cl::opt<unsigned> TLSSize(
       "tls-size", cl::desc("Bit size of immediate TLS offsets"), cl::init(0));
@@ -335,11 +392,11 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
       cl::init(true));
   CGBINDOPT(UniqueSectionNames);
 
-  static cl::opt<bool> UniqueBBSectionNames(
-      "unique-bb-section-names",
+  static cl::opt<bool> UniqueBasicBlockSectionNames(
+      "unique-basic-block-section-names",
       cl::desc("Give unique names to every basic block section"),
       cl::init(false));
-  CGBINDOPT(UniqueBBSectionNames);
+  CGBINDOPT(UniqueBasicBlockSectionNames);
 
   static cl::opt<EABI> EABIVersion(
       "meabi", cl::desc("Set EABI type (default depends on triple):"),
@@ -384,10 +441,33 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
       cl::init(false));
   CGBINDOPT(EnableDebugEntryValues);
 
+  static cl::opt<bool> PseudoProbeForProfiling(
+      "pseudo-probe-for-profiling", cl::desc("Emit pseudo probes for AutoFDO"),
+      cl::init(false));
+  CGBINDOPT(PseudoProbeForProfiling);
+
+  static cl::opt<bool> ValueTrackingVariableLocations(
+      "experimental-debug-variable-locations",
+      cl::desc("Use experimental new value-tracking variable locations"),
+      cl::init(false));
+  CGBINDOPT(ValueTrackingVariableLocations);
+
+  static cl::opt<bool> EnableMachineFunctionSplitter(
+      "split-machine-functions",
+      cl::desc("Split out cold basic blocks from machine functions based on "
+               "profile information"),
+      cl::init(false));
+  CGBINDOPT(EnableMachineFunctionSplitter);
+
   static cl::opt<bool> ForceDwarfFrameSection(
       "force-dwarf-frame-section",
       cl::desc("Always emit a debug frame section."), cl::init(false));
   CGBINDOPT(ForceDwarfFrameSection);
+
+  static cl::opt<bool> XRayOmitFunctionIndex(
+      "no-xray-index", cl::desc("Don't emit xray_fn_idx section"),
+      cl::init(false));
+  CGBINDOPT(XRayOmitFunctionIndex);
 
 #undef CGBINDOPT
 
@@ -415,9 +495,28 @@ codegen::getBBSectionsMode(llvm::TargetOptions &Options) {
   }
 }
 
+llvm::StackProtectorGuards
+codegen::getStackProtectorGuardMode(llvm::TargetOptions &Options) {
+  if (getStackProtectorGuard() == "tls")
+    return StackProtectorGuards::TLS;
+  if (getStackProtectorGuard() == "global")
+    return StackProtectorGuards::Global;
+  if (getStackProtectorGuard() != "none") {
+    ErrorOr<std::unique_ptr<MemoryBuffer>> MBOrErr =
+        MemoryBuffer::getFile(getStackProtectorGuard());
+    if (!MBOrErr)
+      errs() << "error illegal stack protector guard mode: "
+             << MBOrErr.getError().message() << "\n";
+    else
+      Options.BBSectionsFuncListBuf = std::move(*MBOrErr);
+  }
+  return StackProtectorGuards::None;
+}
+
 // Common utility function tightly tied to the options listed here. Initializes
 // a TargetOptions object with CodeGen flags and returns it.
-TargetOptions codegen::InitTargetOptionsFromCodeGenFlags() {
+TargetOptions
+codegen::InitTargetOptionsFromCodeGenFlags(const Triple &TheTriple) {
   TargetOptions Options;
   Options.AllowFPOpFusion = getFuseFPOps();
   Options.UnsafeFPMath = getEnableUnsafeFPMath();
@@ -425,31 +524,47 @@ TargetOptions codegen::InitTargetOptionsFromCodeGenFlags() {
   Options.NoNaNsFPMath = getEnableNoNaNsFPMath();
   Options.NoSignedZerosFPMath = getEnableNoSignedZerosFPMath();
   Options.NoTrappingFPMath = getEnableNoTrappingFPMath();
-  Options.FPDenormalMode = getDenormalFPMath();
+
+  DenormalMode::DenormalModeKind DenormKind = getDenormalFPMath();
+
+  // FIXME: Should have separate input and output flags
+  Options.setFPDenormalMode(DenormalMode(DenormKind, DenormKind));
+
   Options.HonorSignDependentRoundingFPMathOption =
       getEnableHonorSignDependentRoundingFPMath();
   if (getFloatABIForCalls() != FloatABI::Default)
     Options.FloatABIType = getFloatABIForCalls();
+  Options.EnableAIXExtendedAltivecABI = getEnableAIXExtendedAltivecABI();
   Options.NoZerosInBSS = getDontPlaceZerosInBSS();
   Options.GuaranteedTailCallOpt = getEnableGuaranteedTailCallOpt();
   Options.StackAlignmentOverride = getOverrideStackAlignment();
   Options.StackSymbolOrdering = getStackSymbolOrdering();
   Options.UseInitArray = !getUseCtors();
   Options.RelaxELFRelocations = getRelaxELFRelocations();
-  Options.DataSections = getDataSections();
+  Options.DataSections =
+      getExplicitDataSections().getValueOr(TheTriple.hasDefaultDataSections());
   Options.FunctionSections = getFunctionSections();
+  Options.IgnoreXCOFFVisibility = getIgnoreXCOFFVisibility();
+  Options.XCOFFTracebackTable = getXCOFFTracebackTable();
   Options.BBSections = getBBSectionsMode(Options);
   Options.UniqueSectionNames = getUniqueSectionNames();
-  Options.UniqueBBSectionNames = getUniqueBBSectionNames();
+  Options.UniqueBasicBlockSectionNames = getUniqueBasicBlockSectionNames();
+  Options.StackProtectorGuard = getStackProtectorGuardMode(Options);
+  Options.StackProtectorGuardOffset = getStackProtectorGuardOffset();
+  Options.StackProtectorGuardReg = getStackProtectorGuardReg();
   Options.TLSSize = getTLSSize();
   Options.EmulatedTLS = getEmulatedTLS();
   Options.ExplicitEmulatedTLS = EmulatedTLSView->getNumOccurrences() > 0;
   Options.ExceptionModel = getExceptionModel();
   Options.EmitStackSizeSection = getEnableStackSizeSection();
+  Options.EnableMachineFunctionSplitter = getEnableMachineFunctionSplitter();
   Options.EmitAddrsig = getEnableAddrsig();
   Options.EmitCallSiteInfo = getEmitCallSiteInfo();
   Options.EnableDebugEntryValues = getEnableDebugEntryValues();
+  Options.PseudoProbeForProfiling = getPseudoProbeForProfiling();
+  Options.ValueTrackingVariableLocations = getValueTrackingVariableLocations();
   Options.ForceDwarfFrameSection = getForceDwarfFrameSection();
+  Options.XRayOmitFunctionIndex = getXRayOmitFunctionIndex();
 
   Options.MCOptions = mc::InitMCTargetOptionsFromFlags();
 
@@ -562,6 +677,25 @@ void codegen::setFunctionAttributes(StringRef CPU, StringRef Features,
   HANDLE_BOOL_ATTR(EnableNoInfsFPMathView, "no-infs-fp-math");
   HANDLE_BOOL_ATTR(EnableNoNaNsFPMathView, "no-nans-fp-math");
   HANDLE_BOOL_ATTR(EnableNoSignedZerosFPMathView, "no-signed-zeros-fp-math");
+
+  if (DenormalFPMathView->getNumOccurrences() > 0 &&
+      !F.hasFnAttribute("denormal-fp-math")) {
+    DenormalMode::DenormalModeKind DenormKind = getDenormalFPMath();
+
+    // FIXME: Command line flag should expose separate input/output modes.
+    NewAttrs.addAttribute("denormal-fp-math",
+                          DenormalMode(DenormKind, DenormKind).str());
+  }
+
+  if (DenormalFP32MathView->getNumOccurrences() > 0 &&
+      !F.hasFnAttribute("denormal-fp-math-f32")) {
+    // FIXME: Command line flag should expose separate input/output modes.
+    DenormalMode::DenormalModeKind DenormKind = getDenormalFP32Math();
+
+    NewAttrs.addAttribute(
+      "denormal-fp-math-f32",
+      DenormalMode(DenormKind, DenormKind).str());
+  }
 
   if (TrapFuncNameView->getNumOccurrences() > 0)
     for (auto &B : F)

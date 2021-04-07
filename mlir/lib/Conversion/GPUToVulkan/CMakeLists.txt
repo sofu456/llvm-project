@@ -1,19 +1,19 @@
-add_mlir_conversion_library(MLIRGPUtoVulkanTransforms
+add_mlir_conversion_library(MLIRGPUToVulkanTransforms
   ConvertLaunchFuncToVulkanCalls.cpp
   ConvertGPULaunchFuncToVulkanLaunchFunc.cpp
-  )
 
-target_link_libraries(MLIRGPUtoVulkanTransforms
-  PUBLIC
+  DEPENDS
+  MLIRConversionPassIncGen
+
+  LINK_LIBS PUBLIC
   MLIRGPU
   MLIRIR
   MLIRLLVMIR
   MLIRPass
   MLIRSPIRV
   MLIRSPIRVSerialization
-  MLIRStandardOps
+  MLIRStandard
   MLIRSupport
   MLIRTransforms
   MLIRTranslation
-  LLVMSupport
   )

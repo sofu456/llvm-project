@@ -14,18 +14,13 @@
 #define LLVM_LIB_TABLEGEN_TGPARSER_H
 
 #include "TGLexer.h"
-#include "llvm/ADT/Twine.h"
-#include "llvm/Support/SourceMgr.h"
 #include "llvm/TableGen/Error.h"
 #include "llvm/TableGen/Record.h"
 #include <map>
 
 namespace llvm {
-  class Record;
-  class RecordVal;
-  class RecordKeeper;
-  class RecTy;
-  class Init;
+  class SourceMgr;
+  class Twine;
   struct ForeachLoop;
   struct MultiClass;
   struct SubClassReference;
@@ -215,6 +210,7 @@ private: // Semantic analysis methods.
   bool addDefOne(std::unique_ptr<Record> Rec);
 
 private:  // Parser methods.
+  bool consume(tgtok::TokKind K);
   bool ParseObjectList(MultiClass *MC = nullptr);
   bool ParseObject(MultiClass *MC);
   bool ParseClass();
@@ -226,6 +222,7 @@ private:  // Parser methods.
   bool ParseForeach(MultiClass *CurMultiClass);
   bool ParseIf(MultiClass *CurMultiClass);
   bool ParseIfBody(MultiClass *CurMultiClass, StringRef Kind);
+  bool ParseAssert(MultiClass *CurMultiClass, Record *CurRec);
   bool ParseTopLevelLet(MultiClass *CurMultiClass);
   void ParseLetList(SmallVectorImpl<LetRecord> &Result);
 
@@ -246,8 +243,10 @@ private:  // Parser methods.
                          IDParseMode Mode = ParseValueMode);
   Init *ParseValue(Record *CurRec, RecTy *ItemType = nullptr,
                    IDParseMode Mode = ParseValueMode);
-  void ParseValueList(SmallVectorImpl<llvm::Init*> &Result, Record *CurRec,
-                      Record *ArgsRec = nullptr, RecTy *EltTy = nullptr);
+  void ParseValueList(SmallVectorImpl<llvm::Init*> &Result,
+                      Record *CurRec, RecTy *ItemType = nullptr);
+  bool ParseTemplateArgValueList(SmallVectorImpl<llvm::Init *> &Result,
+                                 Record *CurRec, Record *ArgsRec);
   void ParseDagArgList(
       SmallVectorImpl<std::pair<llvm::Init*, StringInit*>> &Result,
       Record *CurRec);
@@ -258,6 +257,8 @@ private:  // Parser methods.
                        TypedInit *FirstItem = nullptr);
   RecTy *ParseType();
   Init *ParseOperation(Record *CurRec, RecTy *ItemType);
+  Init *ParseOperationSubstr(Record *CurRec, RecTy *ItemType);
+  Init *ParseOperationForEachFilter(Record *CurRec, RecTy *ItemType);
   Init *ParseOperationCond(Record *CurRec, RecTy *ItemType);
   RecTy *ParseOperatorType();
   Init *ParseObjectName(MultiClass *CurMultiClass);
@@ -265,6 +266,8 @@ private:  // Parser methods.
   MultiClass *ParseMultiClassID();
   bool ApplyLetStack(Record *CurRec);
   bool ApplyLetStack(RecordsEntry &Entry);
+  bool CheckTemplateArgValues(SmallVectorImpl<llvm::Init *> &Values,
+                              SMLoc Loc, Record *ArgsRec);
 };
 
 } // end namespace llvm

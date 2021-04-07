@@ -335,7 +335,7 @@ const int &reference_to_vec_element = vi4(1).x;
 typedef bool bad __attribute__((__vector_size__(16)));  // expected-error {{invalid vector element type 'bool'}}
 
 namespace Templates {
-template <typename Elt, unsigned Size>
+template <typename Elt, unsigned long long Size>
 struct TemplateVectorType {
   typedef Elt __attribute__((__vector_size__(Size))) type; // #1
 };
@@ -343,7 +343,7 @@ struct TemplateVectorType {
 template <int N, typename T>
 struct PR15730 {
   typedef T __attribute__((vector_size(N * sizeof(T)))) type;
-  typedef T __attribute__((vector_size(8192))) type2; // #2
+  typedef T __attribute__((vector_size(0x1000000000))) type2; // #2
   typedef T __attribute__((vector_size(3))) type3; // #3
 };
 
@@ -352,19 +352,20 @@ void Init() {
   const TemplateVectorType<int, 32>::type Works2 = {};
   // expected-error@#1 {{invalid vector element type 'bool'}}
   // expected-note@+1 {{in instantiation of template class 'Templates::TemplateVectorType<bool, 32>' requested here}}
-  const TemplateVectorType<bool, 32>::type NoBool;
+  const TemplateVectorType<bool, 32>::type NoBool = {};
   // expected-error@#1 {{invalid vector element type 'int __attribute__((ext_vector_type(4)))' (vector of 4 'int' values)}}
   // expected-note@+1 {{in instantiation of template class 'Templates::TemplateVectorType<int __attribute__((ext_vector_type(4))), 32>' requested here}}
-  const TemplateVectorType<vi4, 32>::type NoComplex;
+  const TemplateVectorType<vi4, 32>::type NoComplex = {};
   // expected-error@#1 {{vector size not an integral multiple of component size}}
   // expected-note@+1 {{in instantiation of template class 'Templates::TemplateVectorType<int, 33>' requested here}}
-  const TemplateVectorType<int, 33>::type BadSize;
+  const TemplateVectorType<int, 33>::type BadSize = {};
+  const TemplateVectorType<int, 3200>::type Large = {};
   // expected-error@#1 {{vector size too large}}
-  // expected-note@+1 {{in instantiation of template class 'Templates::TemplateVectorType<int, 8192>' requested here}}
-  const TemplateVectorType<int, 8192>::type TooLarge;
+  // expected-note@+1 {{in instantiation of template class 'Templates::TemplateVectorType<int, 68719476736>' requested here}}
+  const TemplateVectorType<int, 0x1000000000>::type TooLarge = {};
   // expected-error@#1 {{zero vector size}}
   // expected-note@+1 {{in instantiation of template class 'Templates::TemplateVectorType<int, 0>' requested here}}
-  const TemplateVectorType<int, 0>::type Zero;
+  const TemplateVectorType<int, 0>::type Zero = {};
 
   // expected-error@#2 {{vector size too large}}
   // expected-error@#3 {{vector size not an integral multiple of component size}}
@@ -425,6 +426,13 @@ struct ConstantValueNoDiag {
   }
   static constexpr double k = 1;
 };
+template <typename T, int N>
+struct ConstantValueNoDiagDependentValue {
+  float4 f(float4 x) {
+    return k * x;
+  }
+  static constexpr double k = N;
+};
 
 // The following two both diagnose because they cause a truncation.  Test both
 // the dependent type and non-dependent type versions.
@@ -435,6 +443,14 @@ struct DiagTrunc {
     return k * x;
   }
   static constexpr double k = 1340282346638528859811704183484516925443.000000;
+};
+template <typename T, int N>
+struct DiagTruncDependentValue {
+  float4 f(float4 x) {
+    // expected-error@+1{{as implicit conversion would cause truncation}}
+    return k * x;
+  }
+  static constexpr double k = N + 1340282346638528859811704183484516925443.000000;
 };
 template <typename T>
 struct DiagTruncDependentType {
@@ -466,11 +482,51 @@ void use() {
   NormalMember<double>().f(theFloat4);
 #if __cplusplus >= 201103L
   ConstantValueNoDiag<double>().f(theFloat4);
-  // expected-note@+1{{in instantiation of member function}}
+  ConstantValueNoDiagDependentValue<double, 1>().f(theFloat4);
   DiagTrunc<double>().f(theFloat4);
+  // expected-note@+1{{in instantiation of member function}}
+  DiagTruncDependentValue<double, 0>().f(theFloat4);
   // expected-note@+1{{in instantiation of member function}}
   DiagTruncDependentType<double>().f(theFloat4);
   PR45298Consumer<double>().f(theFloat4);
 #endif // __cplusplus >= 201103L
 }
 }
+
+namespace rdar60092165 {
+template <class T> void f() {
+  typedef T first_type __attribute__((vector_size(sizeof(T) * 4)));
+  typedef T second_type __attribute__((vector_size(sizeof(T) * 4)));
+
+  second_type st;
+}
+}
+
+namespace PR45780 {
+enum E { Value = 15 };
+void use(char16 c) {
+  E e;
+  c &Value;   // expected-error{{cannot convert between scalar type 'PR45780::E' and vector type 'char16'}}
+  c == Value; // expected-error{{cannot convert between scalar type 'PR45780::E' and vector type 'char16'}}
+  e | c;      // expected-error{{cannot convert between scalar type 'PR45780::E' and vector type 'char16'}}
+  e != c;     // expected-error{{cannot convert between scalar type 'PR45780::E' and vector type 'char16'}}
+}
+
+} // namespace PR45780
+
+namespace PR48540 {
+// The below used to cause an OOM error, or an assert, make sure it is still
+//  valid.
+int (__attribute__((vector_size(16))) a);
+
+template <typename T, int I>
+struct S {
+  T (__attribute__((vector_size(16))) a);
+  int (__attribute__((vector_size(I))) b);
+  T (__attribute__((vector_size(I))) c);
+};
+
+void use() {
+  S<int, 16> s;
+}
+} // namespace PR48540

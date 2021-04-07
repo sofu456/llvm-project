@@ -98,6 +98,7 @@ static const char *getPropertyName(MachineFunctionProperties::Property Prop) {
   case P::RegBankSelected: return "RegBankSelected";
   case P::Selected: return "Selected";
   case P::TracksLiveness: return "TracksLiveness";
+  case P::TiedOpsRewritten: return "TiedOpsRewritten";
   }
   llvm_unreachable("Invalid machine function property");
 }
@@ -133,8 +134,7 @@ static inline unsigned getFnStackAlignment(const TargetSubtargetInfo *STI,
   return STI->getFrameLowering()->getStackAlign().value();
 }
 
-MachineFunction::MachineFunction(const Function &F,
-                                 const LLVMTargetMachine &Target,
+MachineFunction::MachineFunction(Function &F, const LLVMTargetMachine &Target,
                                  const TargetSubtargetInfo &STI,
                                  unsigned FunctionNum, MachineModuleInfo &mmi)
     : F(F), Target(Target), STI(&STI), Ctx(mmi.getContext()), MMI(mmi) {
@@ -273,20 +273,7 @@ getOrCreateJumpTableInfo(unsigned EntryKind) {
 }
 
 DenormalMode MachineFunction::getDenormalMode(const fltSemantics &FPType) const {
-  if (&FPType == &APFloat::IEEEsingle()) {
-    Attribute Attr = F.getFnAttribute("denormal-fp-math-f32");
-    StringRef Val = Attr.getValueAsString();
-    if (!Val.empty())
-      return parseDenormalFPAttribute(Val);
-
-    // If the f32 variant of the attribute isn't specified, try to use the
-    // generic one.
-  }
-
-  // TODO: Should probably avoid the connection to the IR and store directly
-  // in the MachineFunction.
-  Attribute Attr = F.getFnAttribute("denormal-fp-math");
-  return parseDenormalFPAttribute(Attr.getValueAsString());
+  return F.getDenormalMode(FPType);
 }
 
 /// Should we be emitting segmented stack stuff for the function
@@ -341,65 +328,28 @@ void MachineFunction::RenumberBlocks(MachineBasicBlock *MBB) {
   MBBNumbering.resize(BlockNo);
 }
 
-/// This sets the section ranges of cold or exception section with basic block
-/// sections.
-void MachineFunction::setSectionRange() {
-  // Compute the Section Range of cold and exception basic blocks.  Find the
-  // first and last block of each range.
-  auto SectionRange =
-      ([&](llvm::MachineBasicBlockSection S) -> std::pair<int, int> {
-        auto MBBP =
-            std::find_if(begin(), end(), [&](MachineBasicBlock &MBB) -> bool {
-              return MBB.getSectionType() == S;
-            });
-        if (MBBP == end())
-          return std::make_pair(-1, -1);
-
-        auto MBBQ =
-            std::find_if(rbegin(), rend(), [&](MachineBasicBlock &MBB) -> bool {
-              return MBB.getSectionType() == S;
-            });
-        assert(MBBQ != rend() && "Section end not found!");
-        return std::make_pair(MBBP->getNumber(), MBBQ->getNumber());
-      });
-
-  ExceptionSectionRange = SectionRange(MBBS_Exception);
-  ColdSectionRange = SectionRange(llvm::MBBS_Cold);
-}
-
-/// This is used with -fbasicblock-sections or -fbasicblock-labels option.
-/// A unary encoding of basic block labels is done to keep ".strtab" sizes
-/// small.
-void MachineFunction::createBBLabels() {
-  const TargetInstrInfo *TII = getSubtarget().getInstrInfo();
-  this->BBSectionsSymbolPrefix.resize(getNumBlockIDs(), 'a');
-  for (auto MBBI = begin(), E = end(); MBBI != E; ++MBBI) {
-    assert(
-        (MBBI->getNumber() >= 0 && MBBI->getNumber() < (int)getNumBlockIDs()) &&
-        "BasicBlock number was out of range!");
-    // 'a' - Normal block.
-    // 'r' - Return block.
-    // 'l' - Landing Pad.
-    // 'L' - Return and landing pad.
-    bool isEHPad = MBBI->isEHPad();
-    bool isRetBlock = MBBI->isReturnBlock() && !TII->isTailCall(MBBI->back());
-    char type = 'a';
-    if (isEHPad && isRetBlock)
-      type = 'L';
-    else if (isEHPad)
-      type = 'l';
-    else if (isRetBlock)
-      type = 'r';
-    BBSectionsSymbolPrefix[MBBI->getNumber()] = type;
+/// This method iterates over the basic blocks and assigns their IsBeginSection
+/// and IsEndSection fields. This must be called after MBB layout is finalized
+/// and the SectionID's are assigned to MBBs.
+void MachineFunction::assignBeginEndSections() {
+  front().setIsBeginSection();
+  auto CurrentSectionID = front().getSectionID();
+  for (auto MBBI = std::next(begin()), E = end(); MBBI != E; ++MBBI) {
+    if (MBBI->getSectionID() == CurrentSectionID)
+      continue;
+    MBBI->setIsBeginSection();
+    std::prev(MBBI)->setIsEndSection();
+    CurrentSectionID = MBBI->getSectionID();
   }
+  back().setIsEndSection();
 }
 
 /// Allocate a new MachineInstr. Use this instead of `new MachineInstr'.
 MachineInstr *MachineFunction::CreateMachineInstr(const MCInstrDesc &MCID,
                                                   const DebugLoc &DL,
-                                                  bool NoImp) {
+                                                  bool NoImplicit) {
   return new (InstructionRecycler.Allocate<MachineInstr>(Allocator))
-    MachineInstr(*this, MCID, DL, NoImp);
+      MachineInstr(*this, MCID, DL, NoImplicit);
 }
 
 /// Create a new MachineInstr which is a copy of the 'Orig' instruction,
@@ -427,6 +377,11 @@ MachineInstr &MachineFunction::CloneMachineInstrBundle(MachineBasicBlock &MBB,
       break;
     ++I;
   }
+  // Copy over call site info to the cloned instruction if needed. If Orig is in
+  // a bundle, copyCallSiteInfo takes care of finding the call instruction in
+  // the bundle.
+  if (Orig.shouldUpdateCallSiteInfo())
+    copyCallSiteInfo(&Orig, FirstClone);
   return *FirstClone;
 }
 
@@ -465,18 +420,28 @@ MachineFunction::CreateMachineBasicBlock(const BasicBlock *bb) {
 void
 MachineFunction::DeleteMachineBasicBlock(MachineBasicBlock *MBB) {
   assert(MBB->getParent() == this && "MBB parent mismatch!");
+  // Clean up any references to MBB in jump tables before deleting it.
+  if (JumpTableInfo)
+    JumpTableInfo->RemoveMBBFromJumpTables(MBB);
   MBB->~MachineBasicBlock();
   BasicBlockRecycler.Deallocate(Allocator, MBB);
 }
 
 MachineMemOperand *MachineFunction::getMachineMemOperand(
     MachinePointerInfo PtrInfo, MachineMemOperand::Flags f, uint64_t s,
-    unsigned base_alignment, const AAMDNodes &AAInfo, const MDNode *Ranges,
+    Align base_alignment, const AAMDNodes &AAInfo, const MDNode *Ranges,
     SyncScope::ID SSID, AtomicOrdering Ordering,
     AtomicOrdering FailureOrdering) {
   return new (Allocator)
       MachineMemOperand(PtrInfo, f, s, base_alignment, AAInfo, Ranges,
                         SSID, Ordering, FailureOrdering);
+}
+
+MachineMemOperand *MachineFunction::getMachineMemOperand(
+    const MachineMemOperand *MMO, MachinePointerInfo &PtrInfo, uint64_t Size) {
+  return new (Allocator) MachineMemOperand(
+      PtrInfo, MMO->getFlags(), Size, MMO->getBaseAlign(), AAMDNodes(), nullptr,
+      MMO->getSyncScopeID(), MMO->getOrdering(), MMO->getFailureOrdering());
 }
 
 MachineMemOperand *
@@ -486,13 +451,15 @@ MachineFunction::getMachineMemOperand(const MachineMemOperand *MMO,
 
   // If there is no pointer value, the offset isn't tracked so we need to adjust
   // the base alignment.
-  unsigned Align = PtrInfo.V.isNull()
-                       ? MinAlign(MMO->getBaseAlignment(), Offset)
-                       : MMO->getBaseAlignment();
+  Align Alignment = PtrInfo.V.isNull()
+                        ? commonAlignment(MMO->getBaseAlign(), Offset)
+                        : MMO->getBaseAlign();
 
+  // Do not preserve ranges, since we don't necessarily know what the high bits
+  // are anymore.
   return new (Allocator)
       MachineMemOperand(PtrInfo.getWithOffset(Offset), MMO->getFlags(), Size,
-                        Align, AAMDNodes(), nullptr, MMO->getSyncScopeID(),
+                        Alignment, MMO->getAAInfo(), nullptr, MMO->getSyncScopeID(),
                         MMO->getOrdering(), MMO->getFailureOrdering());
 }
 
@@ -503,18 +470,17 @@ MachineFunction::getMachineMemOperand(const MachineMemOperand *MMO,
              MachinePointerInfo(MMO->getValue(), MMO->getOffset()) :
              MachinePointerInfo(MMO->getPseudoValue(), MMO->getOffset());
 
-  return new (Allocator)
-             MachineMemOperand(MPI, MMO->getFlags(), MMO->getSize(),
-                               MMO->getBaseAlignment(), AAInfo,
-                               MMO->getRanges(), MMO->getSyncScopeID(),
-                               MMO->getOrdering(), MMO->getFailureOrdering());
+  return new (Allocator) MachineMemOperand(
+      MPI, MMO->getFlags(), MMO->getSize(), MMO->getBaseAlign(), AAInfo,
+      MMO->getRanges(), MMO->getSyncScopeID(), MMO->getOrdering(),
+      MMO->getFailureOrdering());
 }
 
 MachineMemOperand *
 MachineFunction::getMachineMemOperand(const MachineMemOperand *MMO,
                                       MachineMemOperand::Flags Flags) {
   return new (Allocator) MachineMemOperand(
-      MMO->getPointerInfo(), Flags, MMO->getSize(), MMO->getBaseAlignment(),
+      MMO->getPointerInfo(), Flags, MMO->getSize(), MMO->getBaseAlign(),
       MMO->getAAInfo(), MMO->getRanges(), MMO->getSyncScopeID(),
       MMO->getOrdering(), MMO->getFailureOrdering());
 }
@@ -665,10 +631,10 @@ void MachineFunction::viewCFGOnly() const
 
 /// Add the specified physical register as a live-in value and
 /// create a corresponding virtual register for it.
-unsigned MachineFunction::addLiveIn(unsigned PReg,
+Register MachineFunction::addLiveIn(MCRegister PReg,
                                     const TargetRegisterClass *RC) {
   MachineRegisterInfo &MRI = getRegInfo();
-  unsigned VReg = MRI.getLiveInVirtReg(PReg);
+  Register VReg = MRI.getLiveInVirtReg(PReg);
   if (VReg) {
     const TargetRegisterClass *VRegRC = MRI.getRegClass(VReg);
     (void)VRegRC;
@@ -884,9 +850,8 @@ int MachineFunction::getFilterIDFor(std::vector<unsigned> &TyIds) {
   // If the new filter coincides with the tail of an existing filter, then
   // re-use the existing filter.  Folding filters more than this requires
   // re-ordering filters and/or their elements - probably not worth it.
-  for (std::vector<unsigned>::iterator I = FilterEnds.begin(),
-       E = FilterEnds.end(); I != E; ++I) {
-    unsigned i = *I, j = TyIds.size();
+  for (unsigned i : FilterEnds) {
+    unsigned j = TyIds.size();
 
     while (i && j)
       if (FilterIds[--i] != TyIds[--j])
@@ -902,7 +867,7 @@ try_next:;
   // Add the new filter.
   int FilterID = -(1 + FilterIds.size());
   FilterIds.reserve(FilterIds.size() + TyIds.size() + 1);
-  FilterIds.insert(FilterIds.end(), TyIds.begin(), TyIds.end());
+  llvm::append_range(FilterIds, TyIds);
   FilterEnds.push_back(FilterIds.size());
   FilterIds.push_back(0); // terminator
   return FilterID;
@@ -980,6 +945,46 @@ void MachineFunction::moveCallSiteInfo(const MachineInstr *Old,
   CallSitesInfo[New] = CSInfo;
 }
 
+void MachineFunction::setDebugInstrNumberingCount(unsigned Num) {
+  DebugInstrNumberingCount = Num;
+}
+
+void MachineFunction::makeDebugValueSubstitution(DebugInstrOperandPair A,
+                                                 DebugInstrOperandPair B) {
+  auto Result = DebugValueSubstitutions.insert(std::make_pair(A, B));
+  (void)Result;
+  assert(Result.second && "Substitution for an already substituted value?");
+}
+
+void MachineFunction::substituteDebugValuesForInst(const MachineInstr &Old,
+                                                   MachineInstr &New,
+                                                   unsigned MaxOperand) {
+  // If the Old instruction wasn't tracked at all, there is no work to do.
+  unsigned OldInstrNum = Old.peekDebugInstrNum();
+  if (!OldInstrNum)
+    return;
+
+  // Iterate over all operands looking for defs to create substitutions for.
+  // Avoid creating new instr numbers unless we create a new substitution.
+  // While this has no functional effect, it risks confusing someone reading
+  // MIR output.
+  // Examine all the operands, or the first N specified by the caller.
+  MaxOperand = std::min(MaxOperand, Old.getNumOperands());
+  for (unsigned int I = 0; I < Old.getNumOperands(); ++I) {
+    const auto &OldMO = Old.getOperand(I);
+    auto &NewMO = New.getOperand(I);
+    (void)NewMO;
+
+    if (!OldMO.isReg() || !OldMO.isDef())
+      continue;
+    assert(NewMO.isDef());
+
+    unsigned NewInstrNum = New.getDebugInstrNum();
+    makeDebugValueSubstitution(std::make_pair(OldInstrNum, I),
+                               std::make_pair(NewInstrNum, I));
+  }
+}
+
 /// \}
 
 //===----------------------------------------------------------------------===//
@@ -1044,6 +1049,17 @@ bool MachineJumpTableInfo::ReplaceMBBInJumpTables(MachineBasicBlock *Old,
   return MadeChange;
 }
 
+/// If MBB is present in any jump tables, remove it.
+bool MachineJumpTableInfo::RemoveMBBFromJumpTables(MachineBasicBlock *MBB) {
+  bool MadeChange = false;
+  for (MachineJumpTableEntry &JTE : JumpTables) {
+    auto removeBeginItr = std::remove(JTE.MBBs.begin(), JTE.MBBs.end(), MBB);
+    MadeChange |= (removeBeginItr != JTE.MBBs.end());
+    JTE.MBBs.erase(removeBeginItr, JTE.MBBs.end());
+  }
+  return MadeChange;
+}
+
 /// If Old is a target of the jump tables, update the jump table to branch to
 /// New instead.
 bool MachineJumpTableInfo::ReplaceMBBInJumpTable(unsigned Idx,
@@ -1090,23 +1106,27 @@ Printable llvm::printJumpTableEntryReference(unsigned Idx) {
 
 void MachineConstantPoolValue::anchor() {}
 
-Type *MachineConstantPoolEntry::getType() const {
+unsigned MachineConstantPoolValue::getSizeInBytes(const DataLayout &DL) const {
+  return DL.getTypeAllocSize(Ty);
+}
+
+unsigned MachineConstantPoolEntry::getSizeInBytes(const DataLayout &DL) const {
   if (isMachineConstantPoolEntry())
-    return Val.MachineCPVal->getType();
-  return Val.ConstVal->getType();
+    return Val.MachineCPVal->getSizeInBytes(DL);
+  return DL.getTypeAllocSize(Val.ConstVal->getType());
 }
 
 bool MachineConstantPoolEntry::needsRelocation() const {
   if (isMachineConstantPoolEntry())
     return true;
-  return Val.ConstVal->needsRelocation();
+  return Val.ConstVal->needsDynamicRelocation();
 }
 
 SectionKind
 MachineConstantPoolEntry::getSectionKind(const DataLayout *DL) const {
   if (needsRelocation())
     return SectionKind::getReadOnlyWithRel();
-  switch (DL->getTypeAllocSize(getType())) {
+  switch (getSizeInBytes(*DL)) {
   case 4:
     return SectionKind::getMergeableConst4();
   case 8:
@@ -1129,11 +1149,9 @@ MachineConstantPool::~MachineConstantPool() {
       Deleted.insert(Constants[i].Val.MachineCPVal);
       delete Constants[i].Val.MachineCPVal;
     }
-  for (DenseSet<MachineConstantPoolValue*>::iterator I =
-       MachineCPVsSharingEntries.begin(), E = MachineCPVsSharingEntries.end();
-       I != E; ++I) {
-    if (Deleted.count(*I) == 0)
-      delete *I;
+  for (MachineConstantPoolValue *CPV : MachineCPVsSharingEntries) {
+    if (Deleted.count(CPV) == 0)
+      delete CPV;
   }
 }
 
@@ -1183,8 +1201,7 @@ static bool CanShareConstantPoolEntry(const Constant *A, const Constant *B,
 /// Create a new entry in the constant pool or return an existing one.
 /// User must specify the log2 of the minimum required alignment for the object.
 unsigned MachineConstantPool::getConstantPoolIndex(const Constant *C,
-                                                   unsigned Alignment) {
-  assert(Alignment && "Alignment must be specified!");
+                                                   Align Alignment) {
   if (Alignment > PoolAlignment) PoolAlignment = Alignment;
 
   // Check to see if we already have this constant.
@@ -1193,7 +1210,7 @@ unsigned MachineConstantPool::getConstantPoolIndex(const Constant *C,
   for (unsigned i = 0, e = Constants.size(); i != e; ++i)
     if (!Constants[i].isMachineConstantPoolEntry() &&
         CanShareConstantPoolEntry(Constants[i].Val.ConstVal, C, DL)) {
-      if ((unsigned)Constants[i].getAlignment() < Alignment)
+      if (Constants[i].getAlign() < Alignment)
         Constants[i].Alignment = Alignment;
       return i;
     }
@@ -1203,8 +1220,7 @@ unsigned MachineConstantPool::getConstantPoolIndex(const Constant *C,
 }
 
 unsigned MachineConstantPool::getConstantPoolIndex(MachineConstantPoolValue *V,
-                                                   unsigned Alignment) {
-  assert(Alignment && "Alignment must be specified!");
+                                                   Align Alignment) {
   if (Alignment > PoolAlignment) PoolAlignment = Alignment;
 
   // Check to see if we already have this constant.
@@ -1230,7 +1246,7 @@ void MachineConstantPool::print(raw_ostream &OS) const {
       Constants[i].Val.MachineCPVal->print(OS);
     else
       Constants[i].Val.ConstVal->printAsOperand(OS, /*PrintType=*/false);
-    OS << ", align=" << Constants[i].getAlignment();
+    OS << ", align=" << Constants[i].getAlign().value();
     OS << "\n";
   }
 }

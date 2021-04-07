@@ -11,8 +11,13 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/GPU/GPUDialect.h"
 #include "mlir/Dialect/GPU/MemoryPromotion.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/SCF.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+#include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/Pass/Pass.h"
 
@@ -24,7 +29,13 @@ namespace {
 /// does not check whether the promotion is legal (e.g., amount of memory used)
 /// or beneficial (e.g., makes previously uncoalesced loads coalesced).
 class TestGpuMemoryPromotionPass
-    : public OperationPass<TestGpuMemoryPromotionPass, gpu::GPUFuncOp> {
+    : public PassWrapper<TestGpuMemoryPromotionPass,
+                         OperationPass<gpu::GPUFuncOp>> {
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<AffineDialect, memref::MemRefDialect, StandardOpsDialect,
+                    scf::SCFDialect>();
+  }
+
   void runOnOperation() override {
     gpu::GPUFuncOp op = getOperation();
     for (unsigned i = 0, e = op.getNumArguments(); i < e; ++i) {

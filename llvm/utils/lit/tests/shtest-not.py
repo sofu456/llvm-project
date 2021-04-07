@@ -1,5 +1,8 @@
 # Check the not command
-#
+
+# FIXME: this test depends on order of tests
+# RUN: rm -f %{inputs}/shtest-not/.lit_test_times.txt
+
 # RUN: not %{lit} -j 1 -a -v %{inputs}/shtest-not \
 # RUN: | FileCheck -match-full-lines %s
 #
@@ -110,6 +113,6 @@
 # CHECK: Error: 'not --crash' cannot call 'rm'
 # CHECK: error: command failed with exit status: {{.*}}
 
-# CHECK: Expected Passes : 1
-# CHECK: Unexpected Failures: 12
+# CHECK: Passed:  1
+# CHECK: Failed: 12
 # CHECK-NOT: {{.}}

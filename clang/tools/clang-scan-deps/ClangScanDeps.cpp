@@ -179,12 +179,12 @@ public:
   SingleCommandCompilationDatabase(tooling::CompileCommand Cmd)
       : Command(std::move(Cmd)) {}
 
-  virtual std::vector<tooling::CompileCommand>
-  getCompileCommands(StringRef FilePath) const {
+  std::vector<tooling::CompileCommand>
+  getCompileCommands(StringRef FilePath) const override {
     return {Command};
   }
 
-  virtual std::vector<tooling::CompileCommand> getAllCompileCommands() const {
+  std::vector<tooling::CompileCommand> getAllCompileCommands() const override {
     return {Command};
   }
 
@@ -218,21 +218,20 @@ static llvm::json::Array toJSONSorted(const llvm::StringSet<> &Set) {
   std::vector<llvm::StringRef> Strings;
   for (auto &&I : Set)
     Strings.push_back(I.getKey());
-  std::sort(Strings.begin(), Strings.end());
+  llvm::sort(Strings);
   return llvm::json::Array(Strings);
 }
 
-static llvm::json::Array toJSONSorted(std::vector<ClangModuleDep> V) {
-  std::sort(V.begin(), V.end(),
-            [](const ClangModuleDep &A, const ClangModuleDep &B) {
-              return std::tie(A.ModuleName, A.ContextHash) <
-                     std::tie(B.ModuleName, B.ContextHash);
-            });
+static llvm::json::Array toJSONSorted(std::vector<ModuleID> V) {
+  llvm::sort(V, [](const ModuleID &A, const ModuleID &B) {
+    return std::tie(A.ModuleName, A.ContextHash) <
+           std::tie(B.ModuleName, B.ContextHash);
+  });
 
   llvm::json::Array Ret;
-  for (const ClangModuleDep &CMD : V)
+  for (const ModuleID &MID : V)
     Ret.push_back(llvm::json::Object(
-        {{"module-name", CMD.ModuleName}, {"context-hash", CMD.ContextHash}}));
+        {{"module-name", MID.ModuleName}, {"context-hash", MID.ContextHash}}));
   return Ret;
 }
 
@@ -245,26 +244,25 @@ public:
 
     InputDeps ID;
     ID.FileName = std::string(Input);
-    ID.ContextHash = std::move(FD.ContextHash);
+    ID.ContextHash = std::move(FD.ID.ContextHash);
     ID.FileDeps = std::move(FD.FileDeps);
     ID.ModuleDeps = std::move(FD.ClangModuleDeps);
 
     std::unique_lock<std::mutex> ul(Lock);
     for (const ModuleDeps &MD : FDR.DiscoveredModules) {
-      auto I = Modules.find({MD.ContextHash, MD.ModuleName, 0});
+      auto I = Modules.find({MD.ID, 0});
       if (I != Modules.end()) {
         I->first.InputIndex = std::min(I->first.InputIndex, InputIndex);
         continue;
       }
-      Modules.insert(
-          I, {{MD.ContextHash, MD.ModuleName, InputIndex}, std::move(MD)});
+      Modules.insert(I, {{MD.ID, InputIndex}, std::move(MD)});
     }
 
     if (FullCommandLine)
       ID.AdditonalCommandLine = FD.getAdditionalCommandLine(
-          [&](ClangModuleDep CMD) { return lookupPCMPath(CMD); },
-          [&](ClangModuleDep CMD) -> const ModuleDeps & {
-            return lookupModuleDeps(CMD);
+          [&](ModuleID MID) { return lookupPCMPath(MID); },
+          [&](ModuleID MID) -> const ModuleDeps & {
+            return lookupModuleDeps(MID);
           });
 
     Inputs.push_back(std::move(ID));
@@ -272,37 +270,36 @@ public:
 
   void printFullOutput(raw_ostream &OS) {
     // Sort the modules by name to get a deterministic order.
-    std::vector<ContextModulePair> ModuleNames;
+    std::vector<IndexedModuleID> ModuleIDs;
     for (auto &&M : Modules)
-      ModuleNames.push_back(M.first);
-    std::sort(ModuleNames.begin(), ModuleNames.end(),
-              [](const ContextModulePair &A, const ContextModulePair &B) {
-                return std::tie(A.ModuleName, A.InputIndex) <
-                       std::tie(B.ModuleName, B.InputIndex);
-              });
+      ModuleIDs.push_back(M.first);
+    llvm::sort(ModuleIDs,
+               [](const IndexedModuleID &A, const IndexedModuleID &B) {
+                 return std::tie(A.ID.ModuleName, A.InputIndex) <
+                        std::tie(B.ID.ModuleName, B.InputIndex);
+               });
 
-    std::sort(Inputs.begin(), Inputs.end(),
-              [](const InputDeps &A, const InputDeps &B) {
-                return A.FileName < B.FileName;
-              });
+    llvm::sort(Inputs, [](const InputDeps &A, const InputDeps &B) {
+      return A.FileName < B.FileName;
+    });
 
     using namespace llvm::json;
 
     Array OutModules;
-    for (auto &&ModName : ModuleNames) {
-      auto &MD = Modules[ModName];
+    for (auto &&ModID : ModuleIDs) {
+      auto &MD = Modules[ModID];
       Object O{
-          {"name", MD.ModuleName},
-          {"context-hash", MD.ContextHash},
+          {"name", MD.ID.ModuleName},
+          {"context-hash", MD.ID.ContextHash},
           {"file-deps", toJSONSorted(MD.FileDeps)},
           {"clang-module-deps", toJSONSorted(MD.ClangModuleDeps)},
           {"clang-modulemap-file", MD.ClangModuleMapFile},
           {"command-line",
            FullCommandLine
                ? MD.getFullCommandLine(
-                     [&](ClangModuleDep CMD) { return lookupPCMPath(CMD); },
-                     [&](ClangModuleDep CMD) -> const ModuleDeps & {
-                       return lookupModuleDeps(CMD);
+                     [&](ModuleID MID) { return lookupPCMPath(MID); },
+                     [&](ModuleID MID) -> const ModuleDeps & {
+                       return lookupModuleDeps(MID);
                      })
                : MD.NonPathCommandLine},
       };
@@ -330,33 +327,31 @@ public:
   }
 
 private:
-  StringRef lookupPCMPath(ClangModuleDep CMD) {
-    return Modules[ContextModulePair{CMD.ContextHash, CMD.ModuleName, 0}]
-        .ImplicitModulePCMPath;
+  StringRef lookupPCMPath(ModuleID MID) {
+    return Modules[IndexedModuleID{MID, 0}].ImplicitModulePCMPath;
   }
 
-  const ModuleDeps &lookupModuleDeps(ClangModuleDep CMD) {
-    auto I =
-        Modules.find(ContextModulePair{CMD.ContextHash, CMD.ModuleName, 0});
+  const ModuleDeps &lookupModuleDeps(ModuleID MID) {
+    auto I = Modules.find(IndexedModuleID{MID, 0});
     assert(I != Modules.end());
     return I->second;
   };
 
-  struct ContextModulePair {
-    std::string ContextHash;
-    std::string ModuleName;
+  struct IndexedModuleID {
+    ModuleID ID;
     mutable size_t InputIndex;
 
-    bool operator==(const ContextModulePair &Other) const {
-      return ContextHash == Other.ContextHash && ModuleName == Other.ModuleName;
+    bool operator==(const IndexedModuleID &Other) const {
+      return ID.ModuleName == Other.ID.ModuleName &&
+             ID.ContextHash == Other.ID.ContextHash;
     }
   };
 
-  struct ContextModulePairHasher {
-    std::size_t operator()(const ContextModulePair &CMP) const {
+  struct IndexedModuleIDHasher {
+    std::size_t operator()(const IndexedModuleID &IMID) const {
       using llvm::hash_combine;
 
-      return hash_combine(CMP.ContextHash, CMP.ModuleName);
+      return hash_combine(IMID.ID.ModuleName, IMID.ID.ContextHash);
     }
   };
 
@@ -364,12 +359,12 @@ private:
     std::string FileName;
     std::string ContextHash;
     std::vector<std::string> FileDeps;
-    std::vector<ClangModuleDep> ModuleDeps;
+    std::vector<ModuleID> ModuleDeps;
     std::vector<std::string> AdditonalCommandLine;
   };
 
   std::mutex Lock;
-  std::unordered_map<ContextModulePair, ModuleDeps, ContextModulePairHasher>
+  std::unordered_map<IndexedModuleID, ModuleDeps, IndexedModuleIDHasher>
       Modules;
   std::vector<InputDeps> Inputs;
 };
@@ -427,18 +422,21 @@ int main(int argc, const char **argv) {
         if (!Args.empty()) {
           std::size_t Idx = Args.size() - 1;
           for (auto It = Args.rbegin(); It != Args.rend(); ++It) {
-            if (It != Args.rbegin()) {
-              if (Args[Idx] == "-o")
+            StringRef Arg = Args[Idx];
+            if (LastO.empty()) {
+              if (Arg == "-o" && It != Args.rbegin())
                 LastO = Args[Idx + 1];
-              if (Args[Idx] == "-MT")
-                HasMT = true;
-              if (Args[Idx] == "-MQ")
-                HasMQ = true;
-              if (Args[Idx] == "-MD")
-                HasMD = true;
-              if (Args[Idx] == "-resource-dir")
-                HasResourceDir = true;
+              else if (Arg.startswith("-o"))
+                LastO = Arg.drop_front(2).str();
             }
+            if (Arg == "-MT")
+              HasMT = true;
+            if (Arg == "-MQ")
+              HasMQ = true;
+            if (Arg == "-MD")
+              HasMD = true;
+            if (Arg == "-resource-dir")
+              HasResourceDir = true;
             --Idx;
           }
         }

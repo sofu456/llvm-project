@@ -26,7 +26,7 @@ define float @v_test_known_not_snan_fneg_input_fmed3_r_i_i_f32(float %a) #0 {
 ; GCN-NEXT:    v_med3_f32 v0, -v0, 2.0, 4.0
 ; GCN-NEXT:    s_setpc_b64 s[30:31]
   %a.nnan.add = fdiv nnan float 1.0, %a, !fpmath !0
-  %known.not.snan = fsub float -0.0, %a.nnan.add
+  %known.not.snan = fneg float %a.nnan.add
   %max = call float @llvm.maxnum.f32(float %known.not.snan, float 2.0)
   %med = call float @llvm.minnum.f32(float %max, float 4.0)
   ret float %med
@@ -667,7 +667,7 @@ declare float @llvm.amdgcn.rsq.f32(float) #1
 declare float @llvm.amdgcn.fract.f32(float) #1
 declare float @llvm.amdgcn.cubeid(float, float, float) #0
 
-attributes #0 = { nounwind }
+attributes #0 = { nounwind "denormal-fp-math-f32"="preserve-sign,preserve-sign" }
 attributes #1 = { nounwind readnone speculatable }
 
 !0 = !{float 2.500000e+00}

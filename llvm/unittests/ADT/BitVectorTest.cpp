@@ -179,6 +179,24 @@ TYPED_TEST(BitVectorTest, TrivialOperation) {
   EXPECT_TRUE(Vec.empty());
 }
 
+TYPED_TEST(BitVectorTest, Equality) {
+  TypeParam A;
+  TypeParam B;
+  EXPECT_TRUE(A == B);
+  A.resize(10);
+  EXPECT_FALSE(A == B);
+  B.resize(10);
+  EXPECT_TRUE(A == B);
+  A.set(5);
+  EXPECT_FALSE(A == B);
+  B.set(5);
+  EXPECT_TRUE(A == B);
+  A.resize(20);
+  EXPECT_FALSE(A == B);
+  B.resize(20);
+  EXPECT_TRUE(A == B);
+}
+
 TYPED_TEST(BitVectorTest, SimpleFindOpsMultiWord) {
   TypeParam A;
 
@@ -279,6 +297,18 @@ TYPED_TEST(BitVectorTest, SimpleFindOpsSingleWord) {
   EXPECT_EQ(-1, A.find_last_unset());
 
   A.resize(20);
+  ASSERT_TRUE(SmallBitVectorIsSmallMode(A));
+  EXPECT_EQ(-1, A.find_first());
+  EXPECT_EQ(-1, A.find_last());
+  EXPECT_EQ(-1, A.find_next(5));
+  EXPECT_EQ(-1, A.find_next(19));
+  EXPECT_EQ(-1, A.find_prev(5));
+  EXPECT_EQ(-1, A.find_prev(20));
+  EXPECT_EQ(0, A.find_first_unset());
+  EXPECT_EQ(19, A.find_last_unset());
+  EXPECT_EQ(6, A.find_next_unset(5));
+  EXPECT_EQ(-1, A.find_next_unset(19));
+
   A.set(3);
   A.set(4);
   A.set(16);
@@ -301,6 +331,19 @@ TYPED_TEST(BitVectorTest, SimpleFindOpsSingleWord) {
   EXPECT_EQ(5, A.find_next_unset(4));
   EXPECT_EQ(13, A.find_next_unset(12));
   EXPECT_EQ(17, A.find_next_unset(15));
+
+  A.set();
+  ASSERT_TRUE(SmallBitVectorIsSmallMode(A));
+  EXPECT_EQ(0, A.find_first());
+  EXPECT_EQ(19, A.find_last());
+  EXPECT_EQ(6, A.find_next(5));
+  EXPECT_EQ(-1, A.find_next(19));
+  EXPECT_EQ(4, A.find_prev(5));
+  EXPECT_EQ(19, A.find_prev(20));
+  EXPECT_EQ(-1, A.find_first_unset());
+  EXPECT_EQ(-1, A.find_last_unset());
+  EXPECT_EQ(-1, A.find_next_unset(5));
+  EXPECT_EQ(-1, A.find_next_unset(19));
 }
 
 TEST(BitVectorTest, FindInRangeMultiWord) {
@@ -736,6 +779,7 @@ TYPED_TEST(BitVectorTest, ProxyIndex) {
   EXPECT_TRUE(Vec.none());
 }
 
+
 TYPED_TEST(BitVectorTest, PortableBitMask) {
   TypeParam A;
   const uint32_t Mask1[] = { 0x80000000, 6, 5 };
@@ -1099,10 +1143,12 @@ TYPED_TEST(BitVectorTest, Iterators) {
 
   TypeParam Empty;
   EXPECT_EQ(Empty.set_bits_begin(), Empty.set_bits_end());
+  int BitCount = 0;
   for (unsigned Bit : Empty.set_bits()) {
     (void)Bit;
-    EXPECT_TRUE(false);
+    BitCount++;
   }
+  ASSERT_EQ(BitCount, 0);
 
   TypeParam ToFill(100, false);
   ToFill.set(0);
@@ -1186,4 +1232,70 @@ TYPED_TEST(BitVectorTest, DenseSet) {
   EXPECT_EQ(true, Set.erase(A));
   EXPECT_EQ(0U, Set.size());
 }
+
+/// Test that capacity doesn't affect hashing.
+TYPED_TEST(BitVectorTest, DenseMapHashing) {
+  using DMI = DenseMapInfo<TypeParam>;
+  {
+    TypeParam A;
+    A.resize(200);
+    A.set(100);
+
+    TypeParam B;
+    B.resize(200);
+    B.set(100);
+    B.reserve(1000);
+
+    EXPECT_EQ(DMI::getHashValue(A), DMI::getHashValue(B));
+  }
+  {
+    TypeParam A;
+    A.resize(20);
+    A.set(10);
+
+    TypeParam B;
+    B.resize(20);
+    B.set(10);
+    B.reserve(1000);
+
+    EXPECT_EQ(DMI::getHashValue(A), DMI::getHashValue(B));
+  }
+}
+
+TEST(BitVectoryTest, Apply) {
+  for (int i = 0; i < 2; ++i) {
+    int j = i * 100 + 3;
+
+    const BitVector x =
+        createBitVector<BitVector>(j + 5, {{i, i + 1}, {j - 1, j}});
+    const BitVector y = createBitVector<BitVector>(j + 5, {{i, j}});
+    const BitVector z =
+        createBitVector<BitVector>(j + 5, {{i + 1, i + 2}, {j, j + 1}});
+
+    auto op0 = [](auto x) { return ~x; };
+    BitVector expected0 = x;
+    expected0.flip();
+    BitVector out0(j - 2);
+    BitVector::apply(op0, out0, x);
+    EXPECT_EQ(out0, expected0);
+
+    auto op1 = [](auto x, auto y) { return x & ~y; };
+    BitVector expected1 = x;
+    expected1.reset(y);
+    BitVector out1;
+    BitVector::apply(op1, out1, x, y);
+    EXPECT_EQ(out1, expected1);
+
+    auto op2 = [](auto x, auto y, auto z) { return (x ^ ~y) | z; };
+    BitVector expected2 = y;
+    expected2.flip();
+    expected2 ^= x;
+    expected2 |= z;
+    BitVector out2(j + 5);
+    BitVector::apply(op2, out2, x, y, z);
+    EXPECT_EQ(out2, expected2);
+  }
+}
+
+
 } // namespace

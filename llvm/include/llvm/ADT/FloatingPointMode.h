@@ -10,15 +10,59 @@
 //
 //===----------------------------------------------------------------------===/
 
-#ifndef LLVM_FLOATINGPOINTMODE_H
-#define LLVM_FLOATINGPOINTMODE_H
+#ifndef LLVM_ADT_FLOATINGPOINTMODE_H
+#define LLVM_ADT_FLOATINGPOINTMODE_H
 
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace llvm {
 
-/// Represent ssubnormal handling kind for floating point instruction inputs and
+/// Rounding mode.
+///
+/// Enumerates supported rounding modes, as well as some special values. The set
+/// of the modes must agree with IEEE-754, 4.3.1 and 4.3.2. The constants
+/// assigned to the IEEE rounding modes must agree with the values used by
+/// FLT_ROUNDS (C11, 5.2.4.2.2p8).
+///
+/// This value is packed into bitfield in some cases, including \c FPOptions, so
+/// the rounding mode values and the special value \c Dynamic must fit into the
+/// the bit field (now - 3 bits). The value \c Invalid is used only in values
+/// returned by intrinsics to indicate errors, it should never be stored as
+/// rounding mode value, so it does not need to fit the bit fields.
+///
+enum class RoundingMode : int8_t {
+  // Rounding mode defined in IEEE-754.
+  TowardZero        = 0,    ///< roundTowardZero.
+  NearestTiesToEven = 1,    ///< roundTiesToEven.
+  TowardPositive    = 2,    ///< roundTowardPositive.
+  TowardNegative    = 3,    ///< roundTowardNegative.
+  NearestTiesToAway = 4,    ///< roundTiesToAway.
+
+  // Special values.
+  Dynamic = 7,    ///< Denotes mode unknown at compile time.
+  Invalid = -1    ///< Denotes invalid value.
+};
+
+/// Returns text representation of the given rounding mode.
+inline StringRef spell(RoundingMode RM) {
+  switch (RM) {
+  case RoundingMode::TowardZero: return "towardzero";
+  case RoundingMode::NearestTiesToEven: return "tonearest";
+  case RoundingMode::TowardPositive: return "upward";
+  case RoundingMode::TowardNegative: return "downward";
+  case RoundingMode::NearestTiesToAway: return "tonearestaway";
+  case RoundingMode::Dynamic: return "dynamic";
+  default: return "invalid";
+  }
+}
+
+inline raw_ostream &operator << (raw_ostream &OS, RoundingMode RM) {
+  OS << spell(RM);
+  return OS;
+}
+
+/// Represent subnormal handling kind for floating point instruction inputs and
 /// outputs.
 struct DenormalMode {
   /// Represent handled modes for denormal (aka subnormal) modes in the floating
@@ -148,4 +192,4 @@ void DenormalMode::print(raw_ostream &OS) const {
 
 }
 
-#endif // LLVM_FLOATINGPOINTMODE_H
+#endif // LLVM_ADT_FLOATINGPOINTMODE_H

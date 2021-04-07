@@ -6,19 +6,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-// UNSUPPORTED: c++98, c++03
+// UNSUPPORTED: c++03
 // UNSUPPORTED: windows
+// UNSUPPORTED: libcxx-no-debug-mode
 
-// MODULES_DEFINES: _LIBCPP_DEBUG=0
-
-// This test requires debug mode, which the library on macOS doesn't have.
-// UNSUPPORTED: with_system_cxx_lib=macosx
+// ADDITIONAL_COMPILE_FLAGS: -D_LIBCPP_DEBUG=0
 
 // <filesystem>
 
 // class path
 
-#define _LIBCPP_DEBUG 0
 #include "filesystem_include.h"
 #include <iterator>
 #include <type_traits>

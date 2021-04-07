@@ -15,6 +15,8 @@
 
 include "mlir/IR/OpBase.td"
 
+def LinalgOperand: AnyTypeOf<[AnyRankedTensor, AnyStridedMemRef]>;
+
 def Linalg_Dialect : Dialect {
   let name = "linalg";
   let description = [{
@@ -26,9 +28,22 @@ def Linalg_Dialect : Dialect {
 
     Additional [Linalg Dialect
     Documentation](https://mlir.llvm.org/docs/Dialects/Linalg) and a
-    [Rationale Document](https://mlir.llvm.org/docs/RationaleLinalgDialect) are
+    [Rationale
+    Document](https://mlir.llvm.org/docs/Rationale/RationaleLinalgDialect) are
     are also available and should be read first before going in the details of
     the op semantics.
+  }];
+  let cppNamespace = "::mlir::linalg";
+  let dependentDialects = [
+    "AffineDialect", "StandardOpsDialect", "tensor::TensorDialect"
+  ];
+  let extraClassDeclaration = [{
+    using RegionBuilderFunType = llvm::function_ref<void(Block &, ValueRange)>;
+    RegionBuilderFunType getRegionBuilder(StringRef name) {
+      return namedStructuredOpRegionBuilders.lookup(name);
+    }
+    private:
+      llvm::StringMap<RegionBuilderFunType> namedStructuredOpRegionBuilders;
   }];
 }
 

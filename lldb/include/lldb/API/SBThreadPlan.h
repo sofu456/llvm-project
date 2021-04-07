@@ -17,8 +17,6 @@ namespace lldb {
 
 class LLDB_API SBThreadPlan {
 
-  friend class lldb_private::ThreadPlan;
-
 public:
   SBThreadPlan();
 
@@ -77,6 +75,10 @@ public:
 
   bool IsValid();
 
+  bool GetStopOthers();
+
+  void SetStopOthers(bool stop_others);
+
   // This section allows an SBThreadPlan to push another of the common types of
   // plans...
   SBThreadPlan QueueThreadPlanForStepOverRange(SBAddress &start_address,
@@ -117,10 +119,11 @@ private:
   friend class lldb_private::QueueImpl;
   friend class SBQueueItem;
 
-  lldb_private::ThreadPlan *get();
+  lldb::ThreadPlanSP GetSP() const { return m_opaque_wp.lock(); }
+  lldb_private::ThreadPlan *get() const { return GetSP().get(); }
   void SetThreadPlan(const lldb::ThreadPlanSP &lldb_object_sp);
 
-  lldb::ThreadPlanSP m_opaque_sp;
+  lldb::ThreadPlanWP m_opaque_wp;
 };
 
 } // namespace lldb

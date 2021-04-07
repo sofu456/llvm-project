@@ -16,6 +16,7 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/WithColor.h"
 
 #include <memory>
 
@@ -23,9 +24,9 @@ namespace lldb_private {
 
 class CommandReturnObject {
 public:
-  CommandReturnObject();
+  CommandReturnObject(bool colors);
 
-  ~CommandReturnObject();
+  ~CommandReturnObject() = default;
 
   llvm::StringRef GetOutputData() {
     lldb::StreamSP stream_sp(m_out_stream.GetStreamAtIndex(eStreamStringIndex));
@@ -45,7 +46,7 @@ public:
     // Make sure we at least have our normal string stream output stream
     lldb::StreamSP stream_sp(m_out_stream.GetStreamAtIndex(eStreamStringIndex));
     if (!stream_sp) {
-      stream_sp.reset(new StreamString());
+      stream_sp = std::make_shared<StreamString>();
       m_out_stream.SetStreamAtIndex(eStreamStringIndex, stream_sp);
     }
     return m_out_stream;
@@ -55,7 +56,7 @@ public:
     // Make sure we at least have our normal string stream output stream
     lldb::StreamSP stream_sp(m_err_stream.GetStreamAtIndex(eStreamStringIndex));
     if (!stream_sp) {
-      stream_sp.reset(new StreamString());
+      stream_sp = std::make_shared<StreamString>();
       m_err_stream.SetStreamAtIndex(eStreamStringIndex, stream_sp);
     }
     return m_err_stream;
@@ -93,8 +94,6 @@ public:
 
   void AppendMessageWithFormat(const char *format, ...)
       __attribute__((format(printf, 2, 3)));
-
-  void AppendRawWarning(llvm::StringRef in_string);
 
   void AppendWarning(llvm::StringRef in_string);
 

@@ -164,8 +164,6 @@ createARMInstructionSelector(const ARMBaseTargetMachine &TM,
 }
 }
 
-const unsigned zero_reg = 0;
-
 #define GET_GLOBALISEL_IMPL
 #include "ARMGenGlobalISel.inc"
 #undef GET_GLOBALISEL_IMPL
@@ -627,7 +625,7 @@ bool ARMInstructionSelector::selectGlobal(MachineInstrBuilder &MIB,
   bool UseMovt = STI.useMovt();
 
   unsigned Size = TM.getPointerSize(0);
-  unsigned Alignment = 4;
+  const Align Alignment(4);
 
   auto addOpsForConstantPoolLoad = [&MF, Alignment,
                                     Size](MachineInstrBuilder &MIB,
@@ -990,7 +988,7 @@ bool ARMInstructionSelector::select(MachineInstr &I) {
   case G_FCONSTANT: {
     // Load from constant pool
     unsigned Size = MRI.getType(I.getOperand(0).getReg()).getSizeInBits() / 8;
-    unsigned Alignment = Size;
+    Align Alignment(Size);
 
     assert((Size == 4 || Size == 8) && "Unsupported FP constant type");
     auto LoadOpcode = Size == 4 ? ARM::VLDRS : ARM::VLDRD;

@@ -143,7 +143,7 @@ static void setSectionAlignmentForBundling(const MCAssembler &Assembler,
     Section->setAlignment(Align(Assembler.getBundleAlignSize()));
 }
 
-void MCELFStreamer::ChangeSection(MCSection *Section,
+void MCELFStreamer::changeSection(MCSection *Section,
                                   const MCExpr *Subsection) {
   MCSection *CurSection = getCurrentSectionOnly();
   if (CurSection && isBundleLocked())
@@ -156,6 +156,8 @@ void MCELFStreamer::ChangeSection(MCSection *Section,
   const MCSymbol *Grp = SectionELF->getGroup();
   if (Grp)
     Asm.registerSymbol(*Grp);
+  if (SectionELF->getFlags() & ELF::SHF_GNU_RETAIN)
+    Asm.getWriter().markGnuAbi();
 
   changeSectionImpl(Section, Subsection);
   Asm.registerSymbol(*Section->getBeginSymbol());
@@ -203,6 +205,7 @@ bool MCELFStreamer::emitSymbolAttribute(MCSymbol *S, MCSymbolAttr Attribute) {
   // defined.
   switch (Attribute) {
   case MCSA_Cold:
+  case MCSA_Extern:
   case MCSA_LazyReference:
   case MCSA_Reference:
   case MCSA_SymbolResolver:
@@ -220,23 +223,35 @@ bool MCELFStreamer::emitSymbolAttribute(MCSymbol *S, MCSymbolAttr Attribute) {
   case MCSA_ELF_TypeGnuUniqueObject:
     Symbol->setType(CombineSymbolTypes(Symbol->getType(), ELF::STT_OBJECT));
     Symbol->setBinding(ELF::STB_GNU_UNIQUE);
-    Symbol->setExternal(true);
     break;
 
   case MCSA_Global:
+    // For `.weak x; .global x`, GNU as sets the binding to STB_WEAK while we
+    // traditionally set the binding to STB_GLOBAL. This is error-prone, so we
+    // error on such cases. Note, we also disallow changed binding from .local.
+    if (Symbol->isBindingSet() && Symbol->getBinding() != ELF::STB_GLOBAL)
+      getContext().reportError(getStartTokLoc(),
+                               Symbol->getName() +
+                                   " changed binding to STB_GLOBAL");
     Symbol->setBinding(ELF::STB_GLOBAL);
-    Symbol->setExternal(true);
     break;
 
   case MCSA_WeakReference:
   case MCSA_Weak:
+    // For `.global x; .weak x`, both MC and GNU as set the binding to STB_WEAK.
+    // We emit a warning for now but may switch to an error in the future.
+    if (Symbol->isBindingSet() && Symbol->getBinding() != ELF::STB_WEAK)
+      getContext().reportWarning(
+          getStartTokLoc(), Symbol->getName() + " changed binding to STB_WEAK");
     Symbol->setBinding(ELF::STB_WEAK);
-    Symbol->setExternal(true);
     break;
 
   case MCSA_Local:
+    if (Symbol->isBindingSet() && Symbol->getBinding() != ELF::STB_LOCAL)
+      getContext().reportError(getStartTokLoc(),
+                               Symbol->getName() +
+                                   " changed binding to STB_LOCAL");
     Symbol->setBinding(ELF::STB_LOCAL);
-    Symbol->setExternal(false);
     break;
 
   case MCSA_ELF_TypeFunction:
@@ -291,10 +306,8 @@ void MCELFStreamer::emitCommonSymbol(MCSymbol *S, uint64_t Size,
   auto *Symbol = cast<MCSymbolELF>(S);
   getAssembler().registerSymbol(*Symbol);
 
-  if (!Symbol->isBindingSet()) {
+  if (!Symbol->isBindingSet())
     Symbol->setBinding(ELF::STB_GLOBAL);
-    Symbol->setExternal(true);
-  }
 
   Symbol->setType(ELF::STT_OBJECT);
 
@@ -323,9 +336,11 @@ void MCELFStreamer::emitELFSize(MCSymbol *Symbol, const MCExpr *Value) {
   cast<MCSymbolELF>(Symbol)->setSize(Value);
 }
 
-void MCELFStreamer::emitELFSymverDirective(StringRef AliasName,
-                                           const MCSymbol *Aliasee) {
-  getAssembler().Symvers.push_back({AliasName, Aliasee});
+void MCELFStreamer::emitELFSymverDirective(const MCSymbol *OriginalSym,
+                                           StringRef Name,
+                                           bool KeepOriginalSym) {
+  getAssembler().Symvers.push_back(MCAssembler::Symver{
+      getStartTokLoc(), OriginalSym, Name, KeepOriginalSym});
 }
 
 void MCELFStreamer::emitLocalCommonSymbol(MCSymbol *S, uint64_t Size,
@@ -334,7 +349,6 @@ void MCELFStreamer::emitLocalCommonSymbol(MCSymbol *S, uint64_t Size,
   // FIXME: Should this be caught and done earlier?
   getAssembler().registerSymbol(*Symbol);
   Symbol->setBinding(ELF::STB_LOCAL);
-  Symbol->setExternal(false);
   emitCommonSymbol(Symbol, Size, ByteAlignment);
 }
 
@@ -364,7 +378,7 @@ void MCELFStreamer::emitCGProfileEntry(const MCSymbolRefExpr *From,
 
 void MCELFStreamer::emitIdent(StringRef IdentString) {
   MCSection *Comment = getAssembler().getContext().getELFSection(
-      ".comment", ELF::SHT_PROGBITS, ELF::SHF_MERGE | ELF::SHF_STRINGS, 1, "");
+      ".comment", ELF::SHT_PROGBITS, ELF::SHF_MERGE | ELF::SHF_STRINGS, 1);
   PushSection();
   SwitchSection(Comment);
   if (!SeenIdent) {
@@ -432,15 +446,18 @@ void MCELFStreamer::fixSymbolsInTLSFixups(const MCExpr *expr) {
     case MCSymbolRefExpr::VK_PPC_GOT_TPREL_LO:
     case MCSymbolRefExpr::VK_PPC_GOT_TPREL_HI:
     case MCSymbolRefExpr::VK_PPC_GOT_TPREL_HA:
+    case MCSymbolRefExpr::VK_PPC_GOT_TPREL_PCREL:
     case MCSymbolRefExpr::VK_PPC_GOT_DTPREL:
     case MCSymbolRefExpr::VK_PPC_GOT_DTPREL_LO:
     case MCSymbolRefExpr::VK_PPC_GOT_DTPREL_HI:
     case MCSymbolRefExpr::VK_PPC_GOT_DTPREL_HA:
     case MCSymbolRefExpr::VK_PPC_TLS:
+    case MCSymbolRefExpr::VK_PPC_TLS_PCREL:
     case MCSymbolRefExpr::VK_PPC_GOT_TLSGD:
     case MCSymbolRefExpr::VK_PPC_GOT_TLSGD_LO:
     case MCSymbolRefExpr::VK_PPC_GOT_TLSGD_HI:
     case MCSymbolRefExpr::VK_PPC_GOT_TLSGD_HA:
+    case MCSymbolRefExpr::VK_PPC_GOT_TLSGD_PCREL:
     case MCSymbolRefExpr::VK_PPC_TLSGD:
     case MCSymbolRefExpr::VK_PPC_GOT_TLSLD:
     case MCSymbolRefExpr::VK_PPC_GOT_TLSLD_LO:
@@ -478,10 +495,8 @@ void MCELFStreamer::finalizeCGProfileEntry(const MCSymbolRefExpr *&SRE) {
   // Not a temporary, referece it as a weak undefined.
   bool Created;
   getAssembler().registerSymbol(*S, &Created);
-  if (Created) {
+  if (Created)
     cast<MCSymbolELF>(S)->setBinding(ELF::STB_WEAK);
-    cast<MCSymbolELF>(S)->setExternal(true);
-  }
 }
 
 void MCELFStreamer::finalizeCGProfile() {
@@ -491,13 +506,13 @@ void MCELFStreamer::finalizeCGProfile() {
   }
 }
 
-void MCELFStreamer::EmitInstToFragment(const MCInst &Inst,
+void MCELFStreamer::emitInstToFragment(const MCInst &Inst,
                                        const MCSubtargetInfo &STI) {
-  this->MCObjectStreamer::EmitInstToFragment(Inst, STI);
+  this->MCObjectStreamer::emitInstToFragment(Inst, STI);
   MCRelaxableFragment &F = *cast<MCRelaxableFragment>(getCurrentFragment());
 
-  for (unsigned i = 0, e = F.getFixups().size(); i != e; ++i)
-    fixSymbolsInTLSFixups(F.getFixups()[i].getValue());
+  for (auto &Fixup : F.getFixups())
+    fixSymbolsInTLSFixups(Fixup.getValue());
 }
 
 // A fragment can only have one Subtarget, and when bundling is enabled we
@@ -509,7 +524,7 @@ static void CheckBundleSubtargets(const MCSubtargetInfo *OldSTI,
     report_fatal_error("A Bundle can only have one Subtarget.");
 }
 
-void MCELFStreamer::EmitInstToData(const MCInst &Inst,
+void MCELFStreamer::emitInstToData(const MCInst &Inst,
                                    const MCSubtargetInfo &STI) {
   MCAssembler &Assembler = getAssembler();
   SmallVector<MCFixup, 4> Fixups;
@@ -517,8 +532,8 @@ void MCELFStreamer::EmitInstToData(const MCInst &Inst,
   raw_svector_ostream VecOS(Code);
   Assembler.getEmitter().encodeInstruction(Inst, VecOS, Fixups, STI);
 
-  for (unsigned i = 0, e = Fixups.size(); i != e; ++i)
-    fixSymbolsInTLSFixups(Fixups[i].getValue());
+  for (auto &Fixup : Fixups)
+    fixSymbolsInTLSFixups(Fixup.getValue());
 
   // There are several possibilities here:
   //
@@ -585,10 +600,11 @@ void MCELFStreamer::EmitInstToData(const MCInst &Inst,
   }
 
   // Add the fixups and data.
-  for (unsigned i = 0, e = Fixups.size(); i != e; ++i) {
-    Fixups[i].setOffset(Fixups[i].getOffset() + DF->getContents().size());
-    DF->getFixups().push_back(Fixups[i]);
+  for (auto &Fixup : Fixups) {
+    Fixup.setOffset(Fixup.getOffset() + DF->getContents().size());
+    DF->getFixups().push_back(Fixup);
   }
+
   DF->setHasInstructions(STI);
   DF->getContents().append(Code.begin(), Code.end());
 
@@ -665,15 +681,15 @@ void MCELFStreamer::emitBundleUnlock() {
     Sec.setBundleLockState(MCSection::NotBundleLocked);
 }
 
-void MCELFStreamer::FinishImpl() {
+void MCELFStreamer::finishImpl() {
   // Ensure the last section gets aligned if necessary.
   MCSection *CurSection = getCurrentSectionOnly();
   setSectionAlignmentForBundling(getAssembler(), CurSection);
 
   finalizeCGProfile();
-  EmitFrames(nullptr);
+  emitFrames(nullptr);
 
-  this->MCObjectStreamer::FinishImpl();
+  this->MCObjectStreamer::finishImpl();
 }
 
 void MCELFStreamer::emitThumbFunc(MCSymbol *Func) {

@@ -7,21 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "SIMachineFunctionInfo.h"
-#include "AMDGPUArgumentUsageInfo.h"
 #include "AMDGPUTargetMachine.h"
-#include "AMDGPUSubtarget.h"
-#include "SIRegisterInfo.h"
-#include "MCTargetDesc/AMDGPUMCTargetDesc.h"
-#include "Utils/AMDGPUBaseInfo.h"
-#include "llvm/ADT/Optional.h"
-#include "llvm/CodeGen/MachineBasicBlock.h"
-#include "llvm/CodeGen/MachineFrameInfo.h"
-#include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/IR/CallingConv.h"
-#include "llvm/IR/Function.h"
-#include <cassert>
-#include <vector>
 
 #define MAX_LANES 64
 
@@ -53,17 +39,17 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
   FlatWorkGroupSizes = ST.getFlatWorkGroupSizes(F);
   WavesPerEU = ST.getWavesPerEU(F);
 
-  Occupancy = ST.computeOccupancy(MF, getLDSSize());
+  Occupancy = ST.computeOccupancy(F, getLDSSize());
   CallingConv::ID CC = F.getCallingConv();
-  const MachineFrameInfo &FrameInfo = MF.getFrameInfo();
 
   // FIXME: Should have analysis or something rather than attribute to detect
   // calls.
-  const bool HasCalls = FrameInfo.hasCalls() || F.hasFnAttribute("amdgpu-calls");
+  const bool HasCalls = F.hasFnAttribute("amdgpu-calls");
 
   // Enable all kernel inputs if we have the fixed ABI. Don't bother if we don't
   // have any calls.
   const bool UseFixedABI = AMDGPUTargetMachine::EnableFixedFunctionABI &&
+                           CC != CallingConv::AMDGPU_Gfx &&
                            (!isEntryFunction() || HasCalls);
 
   if (CC == CallingConv::AMDGPU_KERNEL || CC == CallingConv::SPIR_KERNEL) {
@@ -76,16 +62,21 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
   }
 
   if (!isEntryFunction()) {
-    // Non-entry functions have no special inputs for now, other registers
-    // required for scratch access.
-    ScratchRSrcReg = AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3;
+    if (UseFixedABI)
+      ArgInfo = AMDGPUArgumentUsageInfo::FixedABIFunctionInfo;
 
     // TODO: Pick a high register, and shift down, similar to a kernel.
     FrameOffsetReg = AMDGPU::SGPR33;
     StackPtrOffsetReg = AMDGPU::SGPR32;
 
-    ArgInfo.PrivateSegmentBuffer =
-      ArgDescriptor::createRegister(ScratchRSrcReg);
+    if (!ST.enableFlatScratch()) {
+      // Non-entry functions have no special inputs for now, other registers
+      // required for scratch access.
+      ScratchRSrcReg = AMDGPU::SGPR0_SGPR1_SGPR2_SGPR3;
+
+      ArgInfo.PrivateSegmentBuffer =
+        ArgDescriptor::createRegister(ScratchRSrcReg);
+    }
 
     if (F.hasFnAttribute("amdgpu-implicitarg-ptr"))
       ImplicitArgPtr = true;
@@ -125,8 +116,7 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
       WorkItemIDZ = true;
   }
 
-  bool HasStackObjects = FrameInfo.hasStackObjects();
-
+  bool HasStackObjects = F.hasFnAttribute("amdgpu-stack-objects");
   if (isEntryFunction()) {
     // X, XY, and XYZ are the only supported combinations, so make sure Y is
     // enabled if Z is.
@@ -144,7 +134,8 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
 
   bool isAmdHsaOrMesa = ST.isAmdHsaOrMesa(F);
   if (isAmdHsaOrMesa) {
-    PrivateSegmentBuffer = true;
+    if (!ST.enableFlatScratch())
+      PrivateSegmentBuffer = true;
 
     if (UseFixedABI) {
       DispatchPtr = true;
@@ -169,21 +160,12 @@ SIMachineFunctionInfo::SIMachineFunctionInfo(const MachineFunction &MF)
   if (UseFixedABI || F.hasFnAttribute("amdgpu-kernarg-segment-ptr"))
     KernargSegmentPtr = true;
 
-  if (ST.hasFlatAddressSpace() && isEntryFunction() && isAmdHsaOrMesa) {
-    auto hasNonSpillStackObjects = [&]() {
-      // Avoid expensive checking if there's no stack objects.
-      if (!HasStackObjects)
-        return false;
-      for (auto OI = FrameInfo.getObjectIndexBegin(),
-                OE = FrameInfo.getObjectIndexEnd(); OI != OE; ++OI)
-        if (!FrameInfo.isSpillSlotObjectIndex(OI))
-          return true;
-      // All stack objects are spill slots.
-      return false;
-    };
+  if (ST.hasFlatAddressSpace() && isEntryFunction() &&
+      (isAmdHsaOrMesa || ST.enableFlatScratch())) {
     // TODO: This could be refined a lot. The attribute is a poor way of
-    // detecting calls that may require it before argument lowering.
-    if (HasCalls || hasNonSpillStackObjects())
+    // detecting calls or stack objects that may require it before argument
+    // lowering.
+    if (HasCalls || HasStackObjects || ST.enableFlatScratch())
       FlatScratchInit = true;
   }
 
@@ -261,7 +243,8 @@ Register SIMachineFunctionInfo::addImplicitBufferPtr(const SIRegisterInfo &TRI) 
   return ArgInfo.ImplicitBufferPtr.getRegister();
 }
 
-static bool isCalleeSavedReg(const MCPhysReg *CSRegs, MCPhysReg Reg) {
+bool SIMachineFunctionInfo::isCalleeSavedReg(const MCPhysReg *CSRegs,
+                                             MCPhysReg Reg) {
   for (unsigned I = 0; CSRegs[I]; ++I) {
     if (CSRegs[I] == Reg)
       return true;
@@ -295,22 +278,33 @@ bool SIMachineFunctionInfo::allocateSGPRSpillToVGPR(MachineFunction &MF,
   MachineFrameInfo &FrameInfo = MF.getFrameInfo();
   MachineRegisterInfo &MRI = MF.getRegInfo();
   unsigned WaveSize = ST.getWavefrontSize();
+  SIMachineFunctionInfo *FuncInfo = MF.getInfo<SIMachineFunctionInfo>();
 
   unsigned Size = FrameInfo.getObjectSize(FI);
-  assert(Size >= 4 && Size <= 64 && "invalid sgpr spill size");
+  unsigned NumLanes = Size / 4;
+
+  if (NumLanes > WaveSize)
+    return false;
+
+  assert(Size >= 4 && "invalid sgpr spill size");
   assert(TRI->spillSGPRToVGPR() && "not spilling SGPRs to VGPRs");
-
-  int NumLanes = Size / 4;
-
-  const MCPhysReg *CSRegs = MRI.getCalleeSavedRegs();
 
   // Make sure to handle the case where a wide SGPR spill may span between two
   // VGPRs.
-  for (int I = 0; I < NumLanes; ++I, ++NumVGPRSpillLanes) {
+  for (unsigned I = 0; I < NumLanes; ++I, ++NumVGPRSpillLanes) {
     Register LaneVGPR;
     unsigned VGPRIndex = (NumVGPRSpillLanes % WaveSize);
 
-    if (VGPRIndex == 0) {
+    // Reserve a VGPR (when NumVGPRSpillLanes = 0, WaveSize, 2*WaveSize, ..) and
+    // when one of the two conditions is true:
+    // 1. One reserved VGPR being tracked by VGPRReservedForSGPRSpill is not yet
+    // reserved.
+    // 2. All spill lanes of reserved VGPR(s) are full and another spill lane is
+    // required.
+    if (FuncInfo->VGPRReservedForSGPRSpill && NumVGPRSpillLanes < WaveSize) {
+      assert(FuncInfo->VGPRReservedForSGPRSpill == SpillVGPRs.back().VGPR);
+      LaneVGPR = FuncInfo->VGPRReservedForSGPRSpill;
+    } else if (VGPRIndex == 0) {
       LaneVGPR = TRI->findUnusedRegister(MRI, &AMDGPU::VGPR_32RegClass, MF);
       if (LaneVGPR == AMDGPU::NoRegister) {
         // We have no VGPRs left for spilling SGPRs. Reset because we will not
@@ -320,13 +314,14 @@ bool SIMachineFunctionInfo::allocateSGPRSpillToVGPR(MachineFunction &MF,
         return false;
       }
 
-      Optional<int> CSRSpillFI;
-      if ((FrameInfo.hasCalls() || !isEntryFunction()) && CSRegs &&
-          isCalleeSavedReg(CSRegs, LaneVGPR)) {
-        CSRSpillFI = FrameInfo.CreateSpillStackObject(4, 4);
+      Optional<int> SpillFI;
+      // We need to preserve inactive lanes, so always save, even caller-save
+      // registers.
+      if (!isEntryFunction()) {
+        SpillFI = FrameInfo.CreateSpillStackObject(4, Align(4));
       }
 
-      SpillVGPRs.push_back(SGPRSpillVGPRCSR(LaneVGPR, CSRSpillFI));
+      SpillVGPRs.push_back(SGPRSpillVGPRCSR(LaneVGPR, SpillFI));
 
       // Add this register as live-in to all blocks to avoid machine verifer
       // complaining about use of an undefined physical register.
@@ -339,6 +334,21 @@ bool SIMachineFunctionInfo::allocateSGPRSpillToVGPR(MachineFunction &MF,
     SpillLanes.push_back(SpilledReg(LaneVGPR, VGPRIndex));
   }
 
+  return true;
+}
+
+/// Reserve a VGPR for spilling of SGPRs
+bool SIMachineFunctionInfo::reserveVGPRforSGPRSpills(MachineFunction &MF) {
+  const GCNSubtarget &ST = MF.getSubtarget<GCNSubtarget>();
+  const SIRegisterInfo *TRI = ST.getRegisterInfo();
+  SIMachineFunctionInfo *FuncInfo = MF.getInfo<SIMachineFunctionInfo>();
+
+  Register LaneVGPR = TRI->findUnusedRegister(
+      MF.getRegInfo(), &AMDGPU::VGPR_32RegClass, MF, true);
+  if (LaneVGPR == Register())
+    return false;
+  SpillVGPRs.push_back(SGPRSpillVGPRCSR(LaneVGPR, None));
+  FuncInfo->VGPRReservedForSGPRSpill = LaneVGPR;
   return true;
 }
 
@@ -411,9 +421,9 @@ bool SIMachineFunctionInfo::allocateVGPRSpillToAGPR(MachineFunction &MF,
 }
 
 void SIMachineFunctionInfo::removeDeadFrameIndices(MachineFrameInfo &MFI) {
-  // The FP spill hasn't been inserted yet, so keep it around.
+  // The FP & BP spills haven't been inserted yet, so keep them around.
   for (auto &R : SGPRToVGPRSpills) {
-    if (R.first != FramePointerSaveIndex)
+    if (R.first != FramePointerSaveIndex && R.first != BasePointerSaveIndex)
       MFI.RemoveStackObject(R.first);
   }
 
@@ -421,7 +431,7 @@ void SIMachineFunctionInfo::removeDeadFrameIndices(MachineFrameInfo &MFI) {
   // ID.
   for (int i = MFI.getObjectIndexBegin(), e = MFI.getObjectIndexEnd(); i != e;
        ++i)
-    if (i != FramePointerSaveIndex)
+    if (i != FramePointerSaveIndex && i != BasePointerSaveIndex)
       MFI.setStackID(i, TargetStackID::Default);
 
   for (auto &R : VGPRToAGPRSpills) {
@@ -437,6 +447,27 @@ MCPhysReg SIMachineFunctionInfo::getNextUserSGPR() const {
 
 MCPhysReg SIMachineFunctionInfo::getNextSystemSGPR() const {
   return AMDGPU::SGPR0 + NumUserSGPRs + NumSystemSGPRs;
+}
+
+Register
+SIMachineFunctionInfo::getGITPtrLoReg(const MachineFunction &MF) const {
+  const GCNSubtarget &ST = MF.getSubtarget<GCNSubtarget>();
+  if (!ST.isAmdPalOS())
+    return Register();
+  Register GitPtrLo = AMDGPU::SGPR0; // Low GIT address passed in
+  if (ST.hasMergedShaders()) {
+    switch (MF.getFunction().getCallingConv()) {
+    case CallingConv::AMDGPU_HS:
+    case CallingConv::AMDGPU_GS:
+      // Low GIT address is passed in s8 rather than s0 for an LS+HS or
+      // ES+GS merged shader on gfx9+.
+      GitPtrLo = AMDGPU::SGPR8;
+      return GitPtrLo;
+    default:
+      return GitPtrLo;
+    }
+  }
+  return GitPtrLo;
 }
 
 static yaml::StringValue regToString(Register Reg,
@@ -501,21 +532,21 @@ convertArgumentInfo(const AMDGPUFunctionArgInfo &ArgInfo,
 }
 
 yaml::SIMachineFunctionInfo::SIMachineFunctionInfo(
-  const llvm::SIMachineFunctionInfo& MFI,
-  const TargetRegisterInfo &TRI)
-  : ExplicitKernArgSize(MFI.getExplicitKernArgSize()),
-    MaxKernArgAlign(MFI.getMaxKernArgAlign()),
-    LDSSize(MFI.getLDSSize()),
-    IsEntryFunction(MFI.isEntryFunction()),
-    NoSignedZerosFPMath(MFI.hasNoSignedZerosFPMath()),
-    MemoryBound(MFI.isMemoryBound()),
-    WaveLimiter(MFI.needsWaveLimiter()),
-    HighBitsOf32BitAddress(MFI.get32BitAddressHighBits()),
-    ScratchRSrcReg(regToString(MFI.getScratchRSrcReg(), TRI)),
-    FrameOffsetReg(regToString(MFI.getFrameOffsetReg(), TRI)),
-    StackPtrOffsetReg(regToString(MFI.getStackPtrOffsetReg(), TRI)),
-    ArgInfo(convertArgumentInfo(MFI.getArgInfo(), TRI)),
-    Mode(MFI.getMode()) {}
+    const llvm::SIMachineFunctionInfo &MFI, const TargetRegisterInfo &TRI)
+    : ExplicitKernArgSize(MFI.getExplicitKernArgSize()),
+      MaxKernArgAlign(MFI.getMaxKernArgAlign()), LDSSize(MFI.getLDSSize()),
+      DynLDSAlign(MFI.getDynLDSAlign()), IsEntryFunction(MFI.isEntryFunction()),
+      NoSignedZerosFPMath(MFI.hasNoSignedZerosFPMath()),
+      MemoryBound(MFI.isMemoryBound()), WaveLimiter(MFI.needsWaveLimiter()),
+      HasSpilledSGPRs(MFI.hasSpilledSGPRs()),
+      HasSpilledVGPRs(MFI.hasSpilledVGPRs()),
+      HighBitsOf32BitAddress(MFI.get32BitAddressHighBits()),
+      Occupancy(MFI.getOccupancy()),
+      ScratchRSrcReg(regToString(MFI.getScratchRSrcReg(), TRI)),
+      FrameOffsetReg(regToString(MFI.getFrameOffsetReg(), TRI)),
+      StackPtrOffsetReg(regToString(MFI.getStackPtrOffsetReg(), TRI)),
+      ArgInfo(convertArgumentInfo(MFI.getArgInfo(), TRI)), Mode(MFI.getMode()) {
+}
 
 void yaml::SIMachineFunctionInfo::mappingImpl(yaml::IO &YamlIO) {
   MappingTraits<SIMachineFunctionInfo>::mapping(YamlIO, *this);
@@ -526,10 +557,32 @@ bool SIMachineFunctionInfo::initializeBaseYamlFields(
   ExplicitKernArgSize = YamlMFI.ExplicitKernArgSize;
   MaxKernArgAlign = assumeAligned(YamlMFI.MaxKernArgAlign);
   LDSSize = YamlMFI.LDSSize;
+  DynLDSAlign = YamlMFI.DynLDSAlign;
   HighBitsOf32BitAddress = YamlMFI.HighBitsOf32BitAddress;
+  Occupancy = YamlMFI.Occupancy;
   IsEntryFunction = YamlMFI.IsEntryFunction;
   NoSignedZerosFPMath = YamlMFI.NoSignedZerosFPMath;
   MemoryBound = YamlMFI.MemoryBound;
   WaveLimiter = YamlMFI.WaveLimiter;
+  HasSpilledSGPRs = YamlMFI.HasSpilledSGPRs;
+  HasSpilledVGPRs = YamlMFI.HasSpilledVGPRs;
+  return false;
+}
+
+// Remove VGPR which was reserved for SGPR spills if there are no spilled SGPRs
+bool SIMachineFunctionInfo::removeVGPRForSGPRSpill(Register ReservedVGPR,
+                                                   MachineFunction &MF) {
+  for (auto *i = SpillVGPRs.begin(); i < SpillVGPRs.end(); i++) {
+    if (i->VGPR == ReservedVGPR) {
+      SpillVGPRs.erase(i);
+
+      for (MachineBasicBlock &MBB : MF) {
+        MBB.removeLiveIn(ReservedVGPR);
+        MBB.sortUniqueLiveIns();
+      }
+      this->VGPRReservedForSGPRSpill = AMDGPU::NoRegister;
+      return true;
+    }
+  }
   return false;
 }

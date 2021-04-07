@@ -135,10 +135,10 @@ public:
   /// Insert a new element into the SmartSmallSetVector.
   /// \returns true if the element was inserted into the SmartSmallSetVector.
   bool insert(const T &X) {
-    bool result = setInsert(X);
-    if (result)
+    bool Result = setInsert(X);
+    if (Result)
       Vector.push_back(X);
-    return result;
+    return Result;
   }
 
   /// Clear the SmartSmallSetVector and return the underlying vector.
@@ -157,7 +157,7 @@ using CallStackTy =
 // In given SCC, find *some* call stack that will be cyclic.
 // This will only find *one* such stack, it might not be the smallest one,
 // and there may be other loops.
-CallStackTy PathfindSomeCycle(ArrayRef<CallGraphNode *> SCC) {
+CallStackTy pathfindSomeCycle(ArrayRef<CallGraphNode *> SCC) {
   // We'll need to be able to performantly look up whether some CallGraphNode
   // is in SCC or not, so cache all the SCC elements in a set.
   const ImmutableSmallSet<CallGraphNode *, SmallSCCSize> SCCElts(SCC);
@@ -202,7 +202,7 @@ void NoRecursionCheck::registerMatchers(MatchFinder *Finder) {
 void NoRecursionCheck::handleSCC(ArrayRef<CallGraphNode *> SCC) {
   assert(!SCC.empty() && "Empty SCC does not make sense.");
 
-  // First of all, call out every stongly connected function.
+  // First of all, call out every strongly connected function.
   for (CallGraphNode *N : SCC) {
     FunctionDecl *D = N->getDefinition();
     diag(D->getLocation(), "function %0 is within a recursive call chain") << D;
@@ -212,11 +212,11 @@ void NoRecursionCheck::handleSCC(ArrayRef<CallGraphNode *> SCC) {
   // the call graph. It doesn't *really* tell us about the cycles they form.
   // And there may be more than one cycle in SCC.
   // So let's form a call stack that eventually exposes *some* cycle.
-  const CallStackTy EventuallyCyclicCallStack = PathfindSomeCycle(SCC);
+  const CallStackTy EventuallyCyclicCallStack = pathfindSomeCycle(SCC);
   assert(!EventuallyCyclicCallStack.empty() && "We should've found the cycle");
 
   // While last node of the call stack does cause a loop, due to the way we
-  // pathfind the cycle, the loop does not nessesairly begin at the first node
+  // pathfind the cycle, the loop does not necessarily begin at the first node
   // of the call stack, so drop front nodes of the call stack until it does.
   const auto CyclicCallStack =
       ArrayRef<CallGraphNode::CallRecord>(EventuallyCyclicCallStack)
@@ -260,7 +260,7 @@ void NoRecursionCheck::check(const MatchFinder::MatchResult &Result) {
   CG.addToCallGraph(const_cast<TranslationUnitDecl *>(TU));
 
   // Look for cycles in call graph,
-  // by looking for Strongly Connected Comonents (SCC's)
+  // by looking for Strongly Connected Components (SCC's)
   for (llvm::scc_iterator<CallGraph *> SCCI = llvm::scc_begin(&CG),
                                        SCCE = llvm::scc_end(&CG);
        SCCI != SCCE; ++SCCI) {

@@ -182,7 +182,7 @@ class AggressiveDeadCodeElimination {
 
   /// Identify connected sections of the control flow graph which have
   /// dead terminators and rewrite the control flow graph to remove them.
-  void updateDeadRegions();
+  bool updateDeadRegions();
 
   /// Set the BlockInfo::PostOrder field based on a post-order
   /// numbering of the reverse control flow graph.
@@ -325,7 +325,7 @@ void AggressiveDeadCodeElimination::initialize() {
 
 bool AggressiveDeadCodeElimination::isAlwaysLive(Instruction &I) {
   // TODO -- use llvm::isInstructionTriviallyDead
-  if (I.isEHPad() || I.mayHaveSideEffects()) {
+  if (I.isEHPad() || I.mayHaveSideEffects() || !I.willReturn()) {
     // Skip any value profile instrumentation calls if they are
     // instrumenting constants.
     if (isInstrumentsConstant(I))
@@ -505,7 +505,7 @@ void AggressiveDeadCodeElimination::markLiveBranchesFromControlDependences() {
 //===----------------------------------------------------------------------===//
 bool AggressiveDeadCodeElimination::removeDeadInstructions() {
   // Updates control and dataflow around dead blocks
-  updateDeadRegions();
+  bool RegionsUpdated = updateDeadRegions();
 
   LLVM_DEBUG({
     for (Instruction &I : instructions(F)) {
@@ -521,10 +521,14 @@ bool AggressiveDeadCodeElimination::removeDeadInstructions() {
         // If intrinsic is pointing at a live SSA value, there may be an
         // earlier optimization bug: if we know the location of the variable,
         // why isn't the scope of the location alive?
-        if (Value *V = DII->getVariableLocation())
-          if (Instruction *II = dyn_cast<Instruction>(V))
-            if (isLive(II))
+        for (Value *V : DII->location_ops()) {
+          if (Instruction *II = dyn_cast<Instruction>(V)) {
+            if (isLive(II)) {
               dbgs() << "Dropping debug info for " << *DII << "\n";
+              break;
+            }
+          }
+        }
       }
     }
   });
@@ -556,11 +560,11 @@ bool AggressiveDeadCodeElimination::removeDeadInstructions() {
     I->eraseFromParent();
   }
 
-  return !Worklist.empty();
+  return !Worklist.empty() || RegionsUpdated;
 }
 
 // A dead region is the set of dead blocks with a common live post-dominator.
-void AggressiveDeadCodeElimination::updateDeadRegions() {
+bool AggressiveDeadCodeElimination::updateDeadRegions() {
   LLVM_DEBUG({
     dbgs() << "final dead terminator blocks: " << '\n';
     for (auto *BB : BlocksWithDeadTerminators)
@@ -570,6 +574,7 @@ void AggressiveDeadCodeElimination::updateDeadRegions() {
 
   // Don't compute the post ordering unless we needed it.
   bool HavePostOrder = false;
+  bool Changed = false;
 
   for (auto *BB : BlocksWithDeadTerminators) {
     auto &Info = BlockInfo[BB];
@@ -624,7 +629,10 @@ void AggressiveDeadCodeElimination::updateDeadRegions() {
         .applyUpdates(DeletedEdges);
 
     NumBranchesRemoved += 1;
+    Changed = true;
   }
+
+  return Changed;
 }
 
 // reverse top-sort order
@@ -639,7 +647,7 @@ void AggressiveDeadCodeElimination::computeReversePostOrder() {
   SmallPtrSet<BasicBlock*, 16> Visited;
   unsigned PostOrder = 0;
   for (auto &BB : F) {
-    if (succ_begin(&BB) != succ_end(&BB))
+    if (!succ_empty(&BB))
       continue;
     for (BasicBlock *Block : inverse_post_order_ext(&BB,Visited))
       BlockInfo[Block].PostOrder = PostOrder++;
@@ -685,10 +693,14 @@ PreservedAnalyses ADCEPass::run(Function &F, FunctionAnalysisManager &FAM) {
     return PreservedAnalyses::all();
 
   PreservedAnalyses PA;
-  PA.preserveSet<CFGAnalyses>();
+  // TODO: We could track if we have actually done CFG changes.
+  if (!RemoveControlFlowFlag)
+    PA.preserveSet<CFGAnalyses>();
+  else {
+    PA.preserve<DominatorTreeAnalysis>();
+    PA.preserve<PostDominatorTreeAnalysis>();
+  }
   PA.preserve<GlobalsAA>();
-  PA.preserve<DominatorTreeAnalysis>();
-  PA.preserve<PostDominatorTreeAnalysis>();
   return PA;
 }
 

@@ -1,51 +1,24 @@
-
 add_entrypoint_library(
   llvmlibc
   DEPENDS
-    # assert.h entrypoints
-    __assert_fail
-
-    # errno.h entrypoints
-    __errno_location
-
-    # string.h entrypoints
-    strcpy
-    strcat
-    memcpy
-
-    # sys/mman.h entrypoints
-    mmap
-    munmap
-
-    # signal.h entrypoints
-    raise
-    sigaction
-    sigaddset
-    sigemptyset
-    sigprocmask
-    signal
-
-    # stdlib.h entrypoints
-    _Exit
-    abort
-
-    # threads.h entrypoints
-    mtx_init
-    mtx_lock
-    mtx_unlock
-    thrd_create
-    thrd_join
+  ${TARGET_LLVMLIBC_ENTRYPOINTS}
 )
 
-add_entrypoint_library(
-  llvmlibm
-  DEPENDS
-    # math.h entrypoints
-    round
+if(LLVM_ENABLE_PER_TARGET_RUNTIME_DIR)
+  set(LIBC_INSTALL_LIBRARY_DIR lib${LLVM_LIBDIR_SUFFIX}/${LLVM_DEFAULT_TARGET_TRIPLE})
+else()
+  set(LIBC_INSTALL_LIBRARY_DIR lib${LLVM_LIBDIR_SUFFIX})
+endif()
+
+install(
+  TARGETS llvmlibc
+  ARCHIVE DESTINATION ${LIBC_INSTALL_PREFIX}/${LIBC_INSTALL_LIBRARY_DIR}
+  COMPONENT llvmlibc
 )
 
-add_redirector_library(
-  llvmlibc_redirectors
-  DEPENDS
-    round_redirector
+add_custom_target(
+    install-llvmlibc
+    DEPENDS llvmlibc
+    COMMAND "${CMAKE_COMMAND}" -DCMAKE_INSTALL_COMPONENT=llvmlibc
+            -P "${LIBC_BINARY_DIR}/cmake_install.cmake"
 )

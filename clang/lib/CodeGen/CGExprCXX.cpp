@@ -112,7 +112,8 @@ RValue CodeGenFunction::EmitCXXDestructorCall(
   commonEmitCXXMemberOrOperatorCall(*this, DtorDecl, This, ImplicitParam,
                                     ImplicitParamTy, CE, Args, nullptr);
   return EmitCall(CGM.getTypes().arrangeCXXStructorDeclaration(Dtor), Callee,
-                  ReturnValueSlot(), Args);
+                  ReturnValueSlot(), Args, nullptr,
+                  CE ? CE->getExprLoc() : SourceLocation{});
 }
 
 RValue CodeGenFunction::EmitCXXPseudoDestructorExpr(
@@ -219,7 +220,7 @@ RValue CodeGenFunction::EmitCXXMemberOrOperatorMemberCallExpr(
     DevirtualizedMethod = MD->getCorrespondingMethodInClass(BestDynamicDecl);
     assert(DevirtualizedMethod);
     const CXXRecordDecl *DevirtualizedClass = DevirtualizedMethod->getParent();
-    const Expr *Inner = Base->ignoreParenBaseCasts();
+    const Expr *Inner = Base->IgnoreParenBaseCasts();
     if (DevirtualizedMethod->getReturnType().getCanonicalType() !=
         MD->getReturnType().getCanonicalType())
       // If the return types are not the same, this might be a case where more
@@ -380,7 +381,7 @@ RValue CodeGenFunction::EmitCXXMemberOrOperatorMemberCallExpr(
           IsArrow ? Base->getType()->getPointeeType() : Base->getType();
       EmitCXXDestructorCall(GD, Callee, This.getPointer(*this), ThisTy,
                             /*ImplicitParam=*/nullptr,
-                            /*ImplicitParamTy=*/QualType(), nullptr);
+                            /*ImplicitParamTy=*/QualType(), CE);
     }
     return RValue::get(nullptr);
   }
@@ -1047,7 +1048,8 @@ void CodeGenFunction::EmitNewArrayInitializer(
           cast<ConstantArrayType>(ILE->getType()->getAsArrayTypeUnsafe())
               ->getSize().getZExtValue();
       CurPtr =
-          Address(Builder.CreateInBoundsGEP(CurPtr.getPointer(),
+          Address(Builder.CreateInBoundsGEP(CurPtr.getElementType(),
+                                            CurPtr.getPointer(),
                                             Builder.getSize(InitListElements),
                                             "string.init.end"),
                   CurPtr.getAlignment().alignmentAtOffset(InitListElements *
@@ -1106,7 +1108,8 @@ void CodeGenFunction::EmitNewArrayInitializer(
       StoreAnyExprIntoOneUnit(*this, ILE->getInit(i),
                               ILE->getInit(i)->getType(), CurPtr,
                               AggValueSlot::DoesNotOverlap);
-      CurPtr = Address(Builder.CreateInBoundsGEP(CurPtr.getPointer(),
+      CurPtr = Address(Builder.CreateInBoundsGEP(CurPtr.getElementType(),
+                                                 CurPtr.getPointer(),
                                                  Builder.getSize(1),
                                                  "array.exp.next"),
                        StartAlign.alignmentAtOffset((i + 1) * ElementSize));
@@ -1225,7 +1228,8 @@ void CodeGenFunction::EmitNewArrayInitializer(
 
   // Find the end of the array, hoisted out of the loop.
   llvm::Value *EndPtr =
-    Builder.CreateInBoundsGEP(BeginPtr.getPointer(), NumElements, "array.end");
+    Builder.CreateInBoundsGEP(BeginPtr.getElementType(), BeginPtr.getPointer(),
+                              NumElements, "array.end");
 
   // If the number of elements isn't constant, we have to now check if there is
   // anything left to initialize.
@@ -1328,7 +1332,7 @@ RValue CodeGenFunction::EmitBuiltinNewDeleteCall(const FunctionProtoType *Type,
                                                  const CallExpr *TheCall,
                                                  bool IsDelete) {
   CallArgList Args;
-  EmitCallArgs(Args, Type->getParamTypes(), TheCall->arguments());
+  EmitCallArgs(Args, Type, TheCall->arguments());
   // Find the allocation or deallocation function that we're calling.
   ASTContext &Ctx = getContext();
   DeclarationName Name = Ctx.DeclarationNames
@@ -1569,7 +1573,7 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
   llvm::Value *allocSize =
     EmitCXXNewAllocSize(*this, E, minElements, numElements,
                         allocSizeWithoutCookie);
-  CharUnits allocAlign = getContext().getTypeAlignInChars(allocType);
+  CharUnits allocAlign = getContext().getPreferredTypeAlignInChars(allocType);
 
   // Emit the allocation call.  If the allocator is a global placement
   // operator, just "inline" it directly.
@@ -1636,6 +1640,12 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
 
     RValue RV =
       EmitNewDeleteCall(*this, allocator, allocatorType, allocatorArgs);
+
+    // Set !heapallocsite metadata on the call to operator new.
+    if (getDebugInfo())
+      if (auto *newCall = dyn_cast<llvm::CallBase>(RV.getScalarVal()))
+        getDebugInfo()->addHeapAllocSiteMetadata(newCall, allocType,
+                                                 E->getExprLoc());
 
     // If this was a call to a global replaceable allocation function that does
     // not take an alignment argument, the allocator is known to produce
@@ -1781,11 +1791,14 @@ void CodeGenFunction::EmitDeleteCall(const FunctionDecl *DeleteFD,
   DeleteArgs.add(RValue::get(DeletePtr), ArgTy);
 
   // Pass the std::destroying_delete tag if present.
+  llvm::AllocaInst *DestroyingDeleteTag = nullptr;
   if (Params.DestroyingDelete) {
     QualType DDTag = *ParamTypeIt++;
-    // Just pass an 'undef'. We expect the tag type to be an empty struct.
-    auto *V = llvm::UndefValue::get(getTypes().ConvertType(DDTag));
-    DeleteArgs.add(RValue::get(V), DDTag);
+    llvm::Type *Ty = getTypes().ConvertType(DDTag);
+    CharUnits Align = CGM.getNaturalTypeAlignment(DDTag);
+    DestroyingDeleteTag = CreateTempAlloca(Ty, "destroying.delete.tag");
+    DestroyingDeleteTag->setAlignment(Align.getAsAlign());
+    DeleteArgs.add(RValue::getAggregate(Address(DestroyingDeleteTag, Align)), DDTag);
   }
 
   // Pass the size if the delete function has a size_t parameter.
@@ -1810,8 +1823,9 @@ void CodeGenFunction::EmitDeleteCall(const FunctionDecl *DeleteFD,
   // Pass the alignment if the delete function has an align_val_t parameter.
   if (Params.Alignment) {
     QualType AlignValType = *ParamTypeIt++;
-    CharUnits DeleteTypeAlign = getContext().toCharUnitsFromBits(
-        getContext().getTypeAlignIfKnown(DeleteTy));
+    CharUnits DeleteTypeAlign =
+        getContext().toCharUnitsFromBits(getContext().getTypeAlignIfKnown(
+            DeleteTy, true /* NeedsPreferredAlignment */));
     llvm::Value *Align = llvm::ConstantInt::get(ConvertType(AlignValType),
                                                 DeleteTypeAlign.getQuantity());
     DeleteArgs.add(RValue::get(Align), AlignValType);
@@ -1822,6 +1836,11 @@ void CodeGenFunction::EmitDeleteCall(const FunctionDecl *DeleteFD,
 
   // Emit the call to delete.
   EmitNewDeleteCall(*this, DeleteFD, DeleteFTy, DeleteArgs);
+
+  // If call argument lowering didn't use the destroying_delete_t alloca,
+  // remove it again.
+  if (DestroyingDeleteTag && DestroyingDeleteTag->use_empty())
+    DestroyingDeleteTag->eraseFromParent();
 }
 
 namespace {
@@ -1866,10 +1885,13 @@ static void EmitDestroyingObjectDelete(CodeGenFunction &CGF,
 }
 
 /// Emit the code for deleting a single object.
-static void EmitObjectDelete(CodeGenFunction &CGF,
+/// \return \c true if we started emitting UnconditionalDeleteBlock, \c false
+/// if not.
+static bool EmitObjectDelete(CodeGenFunction &CGF,
                              const CXXDeleteExpr *DE,
                              Address Ptr,
-                             QualType ElementType) {
+                             QualType ElementType,
+                             llvm::BasicBlock *UnconditionalDeleteBlock) {
   // C++11 [expr.delete]p3:
   //   If the static type of the object to be deleted is different from its
   //   dynamic type, the static type shall be a base class of the dynamic type
@@ -1916,7 +1938,7 @@ static void EmitObjectDelete(CodeGenFunction &CGF,
         if (UseVirtualCall) {
           CGF.CGM.getCXXABI().emitVirtualObjectDelete(CGF, DE, Ptr, ElementType,
                                                       Dtor);
-          return;
+          return false;
         }
       }
     }
@@ -1951,7 +1973,15 @@ static void EmitObjectDelete(CodeGenFunction &CGF,
     }
   }
 
+  // When optimizing for size, call 'operator delete' unconditionally.
+  if (CGF.CGM.getCodeGenOpts().OptimizeSize > 1) {
+    CGF.EmitBlock(UnconditionalDeleteBlock);
+    CGF.PopCleanupBlock();
+    return true;
+  }
+
   CGF.PopCleanupBlock();
+  return false;
 }
 
 namespace {
@@ -2007,8 +2037,8 @@ static void EmitArrayDelete(CodeGenFunction &CGF,
       deletedPtr.getAlignment().alignmentOfArrayElement(elementSize);
 
     llvm::Value *arrayBegin = deletedPtr.getPointer();
-    llvm::Value *arrayEnd =
-      CGF.Builder.CreateInBoundsGEP(arrayBegin, numElements, "delete.end");
+    llvm::Value *arrayEnd = CGF.Builder.CreateInBoundsGEP(
+      deletedPtr.getElementType(), arrayBegin, numElements, "delete.end");
 
     // Note that it is legal to allocate a zero-length array, and we
     // can never fold the check away because the length should always
@@ -2028,6 +2058,12 @@ void CodeGenFunction::EmitCXXDeleteExpr(const CXXDeleteExpr *E) {
   Address Ptr = EmitPointerWithAlignment(Arg);
 
   // Null check the pointer.
+  //
+  // We could avoid this null check if we can determine that the object
+  // destruction is trivial and doesn't require an array cookie; we can
+  // unconditionally perform the operator delete call in that case. For now, we
+  // assume that deleted pointers are null rarely enough that it's better to
+  // keep the branch. This might be worth revisiting for a -O0 code size win.
   llvm::BasicBlock *DeleteNotNull = createBasicBlock("delete.notnull");
   llvm::BasicBlock *DeleteEnd = createBasicBlock("delete.end");
 
@@ -2065,7 +2101,8 @@ void CodeGenFunction::EmitCXXDeleteExpr(const CXXDeleteExpr *E) {
       GEP.push_back(Zero);
     }
 
-    Ptr = Address(Builder.CreateInBoundsGEP(Ptr.getPointer(), GEP, "del.first"),
+    Ptr = Address(Builder.CreateInBoundsGEP(Ptr.getElementType(),
+                                            Ptr.getPointer(), GEP, "del.first"),
                   Ptr.getAlignment());
   }
 
@@ -2073,11 +2110,11 @@ void CodeGenFunction::EmitCXXDeleteExpr(const CXXDeleteExpr *E) {
 
   if (E->isArrayForm()) {
     EmitArrayDelete(*this, E, Ptr, DeleteTy);
+    EmitBlock(DeleteEnd);
   } else {
-    EmitObjectDelete(*this, E, Ptr, DeleteTy);
+    if (!EmitObjectDelete(*this, E, Ptr, DeleteTy, DeleteEnd))
+      EmitBlock(DeleteEnd);
   }
-
-  EmitBlock(DeleteEnd);
 }
 
 static bool isGLValueFromPointerDeref(const Expr *E) {
@@ -2167,7 +2204,8 @@ llvm::Value *CodeGenFunction::EmitCXXTypeidExpr(const CXXTypeidExpr *E) {
   //   polymorphic class type, the result refers to a std::type_info object
   //   representing the type of the most derived object (that is, the dynamic
   //   type) to which the glvalue refers.
-  if (E->isPotentiallyEvaluated())
+  // If the operand is already most derived object, no need to look up vtable.
+  if (E->isPotentiallyEvaluated() && !E->isMostDerived(getContext()))
     return EmitTypeidFromVTable(*this, E->getExprOperand(),
                                 StdTypeInfoPtrTy);
 

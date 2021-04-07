@@ -29,6 +29,7 @@
 #include "lldb/Target/Process.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/DataExtractor.h"
+#include "lldb/Utility/LLDBAssert.h"
 #include "lldb/Utility/State.h"
 #include "lldb/Utility/StreamString.h"
 
@@ -57,6 +58,7 @@ cl::SubCommand ObjectFileSubcommand("object-file",
                                     "Display LLDB object file information");
 cl::SubCommand SymbolsSubcommand("symbols", "Dump symbols for an object file");
 cl::SubCommand IRMemoryMapSubcommand("ir-memory-map", "Test IRMemoryMap");
+cl::SubCommand AssertSubcommand("assert", "Test assert handling");
 
 cl::opt<std::string> Log("log", cl::desc("Path to a log file"), cl::init(""),
                          cl::sub(BreakpointSubcommand),
@@ -132,7 +134,7 @@ static cl::opt<std::string> Name("name", cl::desc("Name to find."),
                                  cl::sub(SymbolsSubcommand));
 static cl::opt<bool>
     Regex("regex",
-          cl::desc("Search using regular expressions (avaliable for variables "
+          cl::desc("Search using regular expressions (available for variables "
                    "and functions only)."),
           cl::sub(SymbolsSubcommand));
 static cl::opt<std::string>
@@ -169,10 +171,13 @@ static FunctionNameType getFunctionNameFlags() {
 static cl::opt<bool> DumpAST("dump-ast",
                              cl::desc("Dump AST restored from symbols."),
                              cl::sub(SymbolsSubcommand));
-static cl::opt<bool>
-    DumpClangAST("dump-clang-ast",
-                 cl::desc("Dump clang AST restored from symbols."),
-                 cl::sub(SymbolsSubcommand));
+static cl::opt<bool> DumpClangAST(
+    "dump-clang-ast",
+    cl::desc("Dump clang AST restored from symbols. When used on its own this "
+             "will dump the entire AST of all loaded symbols. When combined "
+             "with -find, it changes the presentation of the search results "
+             "from pretty-printing the types to an AST dump."),
+    cl::sub(SymbolsSubcommand));
 
 static cl::opt<bool> Verify("verify", cl::desc("Verify symbol information."),
                             cl::sub(SymbolsSubcommand));
@@ -192,7 +197,7 @@ static Error findTypes(lldb_private::Module &Module);
 static Error findVariables(lldb_private::Module &Module);
 static Error dumpModule(lldb_private::Module &Module);
 static Error dumpAST(lldb_private::Module &Module);
-static Error dumpClangAST(lldb_private::Module &Module);
+static Error dumpEntireClangAST(lldb_private::Module &Module);
 static Error verify(lldb_private::Module &Module);
 
 static Expected<Error (*)(lldb_private::Module &)> getAction();
@@ -233,6 +238,9 @@ bool evalFree(StringRef Line, IRMemoryMapTestState &State);
 int evaluateMemoryMapCommands(Debugger &Dbg);
 } // namespace irmemorymap
 
+namespace assert {
+int lldb_assert(Debugger &Dbg);
+} // namespace assert
 } // namespace opts
 
 std::vector<CompilerContext> parseCompilerContext() {
@@ -377,7 +385,7 @@ int opts::breakpoint::evaluateBreakpoints(Debugger &Dbg) {
 
     std::string Command = substitute(Line);
     P.formatLine("Command: {0}", Command);
-    CommandReturnObject Result;
+    CommandReturnObject Result(/*colors*/ false);
     if (!Dbg.GetCommandInterpreter().HandleCommand(
             Command.c_str(), /*add_to_history*/ eLazyBoolNo, Result)) {
       P.formatLine("Failed: {0}", Result.GetErrorData());
@@ -402,6 +410,10 @@ opts::symbols::getDeclContext(SymbolFile &Symfile) {
   if (List.GetSize() > 1)
     return make_string_error("Context search found multiple matches.");
   return List.GetVariableAtIndex(0)->GetDeclContext();
+}
+
+static lldb::DescriptionLevel GetDescriptionLevel() {
+  return opts::symbols::DumpClangAST ? eDescriptionLevelVerbose : eDescriptionLevelFull;
 }
 
 Error opts::symbols::findFunctions(lldb_private::Module &Module) {
@@ -523,7 +535,7 @@ Error opts::symbols::findTypes(lldb_private::Module &Module) {
   LanguageSet languages;
   if (!Language.empty())
     languages.Insert(Language::GetLanguageTypeFromString(Language));
-  
+
   DenseSet<SymbolFile *> SearchedFiles;
   TypeMap Map;
   if (!Name.empty())
@@ -534,7 +546,12 @@ Error opts::symbols::findTypes(lldb_private::Module &Module) {
 
   outs() << formatv("Found {0} types:\n", Map.GetSize());
   StreamString Stream;
-  Map.Dump(&Stream, false);
+  // Resolve types to force-materialize typedef types.
+  Map.ForEach([&](TypeSP &type) {
+    type->GetFullCompilerType();
+    return false;
+  });
+  Map.Dump(&Stream, false, GetDescriptionLevel());
   outs() << Stream.GetData() << "\n";
   return Error::success();
 }
@@ -615,7 +632,7 @@ Error opts::symbols::dumpAST(lldb_private::Module &Module) {
   return Error::success();
 }
 
-Error opts::symbols::dumpClangAST(lldb_private::Module &Module) {
+Error opts::symbols::dumpEntireClangAST(lldb_private::Module &Module) {
   Module.ParseAllDebugSymbols();
 
   SymbolFile *symfile = Module.GetSymbolFile();
@@ -651,7 +668,7 @@ Error opts::symbols::verify(lldb_private::Module &Module) {
   for (uint32_t i = 0; i < comp_units_count; i++) {
     lldb::CompUnitSP comp_unit = symfile->GetCompileUnitAtIndex(i);
     if (!comp_unit)
-      return make_string_error("Connot parse compile unit {0}.", i);
+      return make_string_error("Cannot parse compile unit {0}.", i);
 
     outs() << "Processing '"
            << comp_unit->GetPrimaryFile().GetFilename().AsCString()
@@ -719,13 +736,17 @@ Expected<Error (*)(lldb_private::Module &)> opts::symbols::getAction() {
   }
 
   if (DumpClangAST) {
-    if (Find != FindType::None)
-      return make_string_error("Cannot both search and dump clang AST.");
-    if (Regex || !Context.empty() || !File.empty() || Line != 0)
-      return make_string_error(
-          "-regex, -context, -name, -file and -line options are not "
-          "applicable for dumping clang AST.");
-    return dumpClangAST;
+    if (Find == FindType::None) {
+      if (Regex || !Context.empty() || !File.empty() || Line != 0)
+        return make_string_error(
+            "-regex, -context, -name, -file and -line options are not "
+            "applicable for dumping the entire clang AST. Either combine with "
+            "-find, or use -dump-clang-ast as a standalone option.");
+      return dumpEntireClangAST;
+    }
+    if (Find != FindType::Type)
+      return make_string_error("This combination of -dump-clang-ast and -find "
+                               "<kind> is not yet implemented.");
   }
 
   if (Regex && !Context.empty())
@@ -1018,7 +1039,7 @@ int opts::irmemorymap::evaluateMemoryMapCommands(Debugger &Dbg) {
 
   // Set up a Process. In order to allocate memory within a target, this
   // process must be alive and must support JIT'ing.
-  CommandReturnObject Result;
+  CommandReturnObject Result(/*colors*/ false);
   Dbg.SetAsyncExecution(false);
   CommandInterpreter &CI = Dbg.GetCommandInterpreter();
   auto IssueCmd = [&](const char *Cmd) -> bool {
@@ -1061,6 +1082,11 @@ int opts::irmemorymap::evaluateMemoryMapCommands(Debugger &Dbg) {
   return 0;
 }
 
+int opts::assert::lldb_assert(Debugger &Dbg) {
+  lldbassert(false && "lldb-test assert");
+  return 1;
+}
+
 int main(int argc, const char *argv[]) {
   StringRef ToolName = argv[0];
   sys::PrintStackTraceOnErrorSignal(ToolName);
@@ -1082,9 +1108,15 @@ int main(int argc, const char *argv[]) {
 
   auto Dbg = lldb_private::Debugger::CreateInstance();
   ModuleList::GetGlobalModuleListProperties().SetEnableExternalLookup(false);
-  CommandReturnObject Result;
+  CommandReturnObject Result(/*colors*/ false);
   Dbg->GetCommandInterpreter().HandleCommand(
       "settings set plugin.process.gdb-remote.packet-timeout 60",
+      /*add_to_history*/ eLazyBoolNo, Result);
+  Dbg->GetCommandInterpreter().HandleCommand(
+      "settings set target.inherit-tcc true",
+      /*add_to_history*/ eLazyBoolNo, Result);
+  Dbg->GetCommandInterpreter().HandleCommand(
+      "settings set target.detach-on-error false",
       /*add_to_history*/ eLazyBoolNo, Result);
 
   if (!opts::Log.empty())
@@ -1098,6 +1130,8 @@ int main(int argc, const char *argv[]) {
     return opts::symbols::dumpSymbols(*Dbg);
   if (opts::IRMemoryMapSubcommand)
     return opts::irmemorymap::evaluateMemoryMapCommands(*Dbg);
+  if (opts::AssertSubcommand)
+    return opts::assert::lldb_assert(*Dbg);
 
   WithColor::error() << "No command specified.\n";
   return 1;

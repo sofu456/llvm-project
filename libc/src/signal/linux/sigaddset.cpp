@@ -1,4 +1,4 @@
-//===----------------- Linux implementation of sigaddset ------------------===//
+//===-- Linux implementation of sigaddset ---------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -15,7 +15,7 @@
 
 namespace __llvm_libc {
 
-int LLVM_LIBC_ENTRYPOINT(sigaddset)(sigset_t *set, int signum) {
+LLVM_LIBC_FUNCTION(int, sigaddset, (sigset_t * set, int signum)) {
   if (!set || (unsigned)(signum - 1) >= (8 * sizeof(sigset_t))) {
     llvmlibc_errno = EINVAL;
     return -1;

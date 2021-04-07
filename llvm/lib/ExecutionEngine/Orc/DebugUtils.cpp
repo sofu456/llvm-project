@@ -150,6 +150,10 @@ raw_ostream &operator<<(raw_ostream &OS, const SymbolNameVector &Symbols) {
   return OS << printSequence(Symbols, '[', ']', PrintAll<SymbolStringPtr>());
 }
 
+raw_ostream &operator<<(raw_ostream &OS, ArrayRef<SymbolStringPtr> Symbols) {
+  return OS << printSequence(Symbols, '[', ']', PrintAll<SymbolStringPtr>());
+}
+
 raw_ostream &operator<<(raw_ostream &OS, const JITSymbolFlags &Flags) {
   if (Flags.hasError())
     OS << "[*ERROR*]";
@@ -257,8 +261,7 @@ raw_ostream &operator<<(raw_ostream &OS,
            "JITDylibList entries must not be null");
     OS << " (\"" << SearchOrder.front().first->getName() << "\", "
        << SearchOrder.begin()->second << ")";
-    for (auto &KV :
-         make_range(std::next(SearchOrder.begin(), 1), SearchOrder.end())) {
+    for (auto &KV : llvm::drop_begin(SearchOrder)) {
       assert(KV.first && "JITDylibList entries must not be null");
       OS << ", (\"" << KV.first->getName() << "\", " << KV.second << ")";
     }

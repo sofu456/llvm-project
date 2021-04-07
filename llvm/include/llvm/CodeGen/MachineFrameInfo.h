@@ -14,6 +14,7 @@
 #define LLVM_CODEGEN_MACHINEFRAMEINFO_H
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/CodeGen/Register.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/DataTypes.h"
 #include <cassert>
@@ -31,7 +32,7 @@ class AllocaInst;
 /// Callee saved reg can also be saved to a different register rather than
 /// on the stack by setting DstReg instead of FrameIdx.
 class CalleeSavedInfo {
-  unsigned Reg;
+  Register Reg;
   union {
     int FrameIdx;
     unsigned DstReg;
@@ -58,14 +59,14 @@ public:
   : Reg(R), FrameIdx(FI), Restored(true), SpilledToReg(false) {}
 
   // Accessors.
-  unsigned getReg()                        const { return Reg; }
+  Register getReg()                        const { return Reg; }
   int getFrameIdx()                        const { return FrameIdx; }
   unsigned getDstReg()                     const { return DstReg; }
   void setFrameIdx(int FI) {
     FrameIdx = FI;
     SpilledToReg = false;
   }
-  void setDstReg(unsigned SpillReg) {
+  void setDstReg(Register SpillReg) {
     DstReg = SpillReg;
     SpilledToReg = true;
   }
@@ -460,12 +461,10 @@ public:
     Objects[ObjectIdx+NumFixedObjects].Size = Size;
   }
 
-  /// Return the alignment of the specified stack object.
-  /// FIXME: Remove this function once transition to Align is over.
-  unsigned getObjectAlignment(int ObjectIdx) const {
-    assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
-           "Invalid Object Idx!");
-    return Objects[ObjectIdx + NumFixedObjects].Alignment.value();
+  LLVM_ATTRIBUTE_DEPRECATED(inline unsigned getObjectAlignment(int ObjectIdx)
+                                const,
+                            "Use getObjectAlign instead") {
+    return getObjectAlign(ObjectIdx).value();
   }
 
   /// Return the alignment of the specified stack object.
@@ -473,18 +472,6 @@ public:
     assert(unsigned(ObjectIdx + NumFixedObjects) < Objects.size() &&
            "Invalid Object Idx!");
     return Objects[ObjectIdx + NumFixedObjects].Alignment;
-  }
-
-  /// setObjectAlignment - Change the alignment of the specified stack object.
-  /// FIXME: Remove this function once transition to Align is over.
-  void setObjectAlignment(int ObjectIdx, unsigned Align) {
-    assert(unsigned(ObjectIdx+NumFixedObjects) < Objects.size() &&
-           "Invalid Object Idx!");
-    Objects[ObjectIdx + NumFixedObjects].Alignment = assumeAligned(Align);
-
-    // Only ensure max alignment for the default stack.
-    if (getStackID(ObjectIdx) == 0)
-      ensureMaxAlignment(assumeAligned(Align));
   }
 
   /// setObjectAlignment - Change the alignment of the specified stack object.
@@ -496,6 +483,12 @@ public:
     // Only ensure max alignment for the default stack.
     if (getStackID(ObjectIdx) == 0)
       ensureMaxAlignment(Alignment);
+  }
+
+  LLVM_ATTRIBUTE_DEPRECATED(inline void setObjectAlignment(int ObjectIdx,
+                                                           unsigned Align),
+                            "Use the version that takes Align instead") {
+    setObjectAlignment(ObjectIdx, assumeAligned(Align));
   }
 
   /// Return the underlying Alloca of the specified
@@ -593,7 +586,7 @@ public:
 
   /// Make sure the function is at least Align bytes aligned.
   void ensureMaxAlignment(Align Alignment);
-  /// FIXME: Remove this once transition to Align is over.
+
   LLVM_ATTRIBUTE_DEPRECATED(inline void ensureMaxAlignment(unsigned Align),
                             "Use the version that uses Align instead") {
     ensureMaxAlignment(assumeAligned(Align));
@@ -632,7 +625,7 @@ public:
 
   /// Returns true if the function contains a tail call.
   bool hasTailCall() const { return HasTailCall; }
-  void setHasTailCall() { HasTailCall = true; }
+  void setHasTailCall(bool V = true) { HasTailCall = V; }
 
   /// Computes the maximum size of a callframe and the AdjustsStack property.
   /// This only works for targets defining
@@ -763,11 +756,12 @@ public:
   /// a nonnegative identifier to represent it.
   int CreateStackObject(uint64_t Size, Align Alignment, bool isSpillSlot,
                         const AllocaInst *Alloca = nullptr, uint8_t ID = 0);
-  /// FIXME: Remove this function when transition to Align is over.
-  inline int CreateStackObject(uint64_t Size, unsigned Alignment,
-                               bool isSpillSlot,
-                               const AllocaInst *Alloca = nullptr,
-                               uint8_t ID = 0) {
+  LLVM_ATTRIBUTE_DEPRECATED(
+      inline int CreateStackObject(uint64_t Size, unsigned Alignment,
+                                   bool isSpillSlot,
+                                   const AllocaInst *Alloca = nullptr,
+                                   uint8_t ID = 0),
+      "Use CreateStackObject that takes an Align instead") {
     return CreateStackObject(Size, assumeAligned(Alignment), isSpillSlot,
                              Alloca, ID);
   }
@@ -775,8 +769,9 @@ public:
   /// Create a new statically sized stack object that represents a spill slot,
   /// returning a nonnegative identifier to represent it.
   int CreateSpillStackObject(uint64_t Size, Align Alignment);
-  /// FIXME: Remove this function when transition to Align is over.
-  inline int CreateSpillStackObject(uint64_t Size, unsigned Alignment) {
+  LLVM_ATTRIBUTE_DEPRECATED(
+      inline int CreateSpillStackObject(uint64_t Size, unsigned Alignment),
+      "Use CreateSpillStackObject that takes an Align instead") {
     return CreateSpillStackObject(Size, assumeAligned(Alignment));
   }
 
@@ -791,7 +786,9 @@ public:
   /// created, whether or not the index returned is actually used.
   int CreateVariableSizedObject(Align Alignment, const AllocaInst *Alloca);
   /// FIXME: Remove this function when transition to Align is over.
-  int CreateVariableSizedObject(unsigned Alignment, const AllocaInst *Alloca) {
+  LLVM_ATTRIBUTE_DEPRECATED(int CreateVariableSizedObject(
+                                unsigned Alignment, const AllocaInst *Alloca),
+                            "Use the version that takes an Align instead") {
     return CreateVariableSizedObject(assumeAligned(Alignment), Alloca);
   }
 

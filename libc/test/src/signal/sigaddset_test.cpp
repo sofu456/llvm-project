@@ -1,4 +1,4 @@
-//===----------------------- Unittests for sigaddset ----------------------===//
+//===-- Unittests for sigaddset -------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -8,14 +8,13 @@
 
 #include "include/errno.h"
 #include "include/signal.h"
-#include "src/errno/llvmlibc_errno.h"
 #include "src/signal/sigaddset.h"
 
-#include "utils/UnitTest/ErrnoSetterMatcher.h"
+#include "test/ErrnoSetterMatcher.h"
 #include "utils/UnitTest/Test.h"
 
 // This tests invalid inputs and ensures errno is properly set.
-TEST(SignalTest, SigaddsetInvalid) {
+TEST(LlvmLibcSignalTest, SigaddsetInvalid) {
   using __llvm_libc::testing::ErrnoSetterMatcher::Fails;
   using __llvm_libc::testing::ErrnoSetterMatcher::Succeeds;
   EXPECT_THAT(__llvm_libc::sigaddset(nullptr, SIGSEGV), Fails(EINVAL));

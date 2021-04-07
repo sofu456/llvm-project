@@ -46,6 +46,16 @@ class CppBitfieldsTestCase(TestBase):
         self.expect("expr (clang_example.f.a)", VARIABLES_DISPLAYED_CORRECTLY,
                     substrs=['uint64_t', '1'])
 
+        self.expect("expr uwbf",
+            substrs=['a = 255',
+                    'b = 65535',
+                    'c = 4294967295',
+                    'x = 4294967295'] )
+
+        self.expect("expr uwubf",
+            substrs=['a = 16777215',
+                    'x = 4294967295'] )
+
         self.expect(
             "frame variable --show-types lba",
             VARIABLES_DISPLAYED_CORRECTLY,
@@ -103,3 +113,10 @@ class CppBitfieldsTestCase(TestBase):
                    '(uint64_t:1) k = 1',
                 ])
 
+        self.expect(
+            "frame variable --show-types derived",
+            VARIABLES_DISPLAYED_CORRECTLY,
+            substrs=[
+                '(uint32_t) b_a = 2',
+                '(uint32_t:1) d_a = 1',
+                ])

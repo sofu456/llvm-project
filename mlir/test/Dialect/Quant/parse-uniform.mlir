@@ -1,4 +1,4 @@
-// RUN: mlir-opt %s -split-input-file | FileCheck %s
+// RUN: mlir-opt -allow-unregistered-dialect %s -split-input-file | FileCheck %s
 
 // -----
 // All per-layer params specified:
@@ -87,6 +87,15 @@ func @parse() -> !qalias {
 // Expressed type: f32
 // CHECK: !quant.uniform<u8:f32, 2.000000e+02>
 !qalias = type !quant.uniform<u8:f32, 2.0e+2>
+func @parse() -> !qalias {
+  %0 = "foo"() : () -> !qalias
+  return %0 : !qalias
+}
+
+// -----
+// Expressed type: f32
+// CHECK: !quant.uniform<u8:f32, 0x41646ABBA0000000:128>
+!qalias = type !quant.uniform<u8:f32, 0x41646ABBA0000000:128>
 func @parse() -> !qalias {
   %0 = "foo"() : () -> !qalias
   return %0 : !qalias

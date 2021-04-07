@@ -3,7 +3,6 @@ set(LLVM_LINK_COMPONENTS
   AllTargetsDisassemblers
   AllTargetsInfos
   BinaryFormat
-  CodeGen
   DebugInfoDWARF
   DebugInfoPDB
   Demangle
@@ -20,6 +19,7 @@ add_llvm_tool(llvm-objdump
   ELFDump.cpp
   MachODump.cpp
   WasmDump.cpp
+  XCOFFDump.cpp
   )
 
 if(HAVE_LIBXAR)

@@ -13,13 +13,12 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/MC/MCDirectives.h"
 #include "llvm/MC/MCStreamer.h"
-#include "llvm/MC/MCSymbol.h"
 #include "llvm/Support/SMLoc.h"
 #include <vector>
 
 namespace llvm {
 
-class GlobalValue;
+class MCSymbol;
 class Module;
 
 class RecordStreamer : public MCStreamer {
@@ -64,8 +63,8 @@ public:
   void EndCOFFSymbolDef() override {}
 
   /// Record .symver aliases for later processing.
-  void emitELFSymverDirective(StringRef AliasName,
-                              const MCSymbol *Aliasee) override;
+  void emitELFSymverDirective(const MCSymbol *OriginalSym, StringRef Name,
+                              bool KeepOriginalSym) override;
 
   // Emit ELF .symver aliases and ensure they have the same binding as the
   // defined symbol they alias with.

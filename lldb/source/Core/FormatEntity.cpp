@@ -1769,7 +1769,7 @@ bool FormatEntity::Format(const Entry &entry, Stream &s,
       return false;
     s.PutCString(name);
 
-    if (sc->block->GetContainingInlinedBlock()) {
+    if (sc->block && sc->block->GetContainingInlinedBlock()) {
       if (const InlineFunctionInfo *inline_info =
               sc->block->GetInlinedFunctionInfo()) {
         s.PutCString(" [inlined] ");
@@ -2409,7 +2409,7 @@ void FormatEntity::AutoComplete(CompletionRequest &request) {
 
   llvm::StringRef partial_variable(str.substr(dollar_pos + 2));
   if (partial_variable.empty()) {
-    // Suggest all top level entites as we are just past "${"
+    // Suggest all top level entities as we are just past "${"
     StringList new_matches;
     AddMatches(&g_root, str, llvm::StringRef(), new_matches);
     request.AddCompletions(new_matches);

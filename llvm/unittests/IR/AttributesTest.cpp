@@ -44,6 +44,7 @@ TEST(Attributes, Ordering) {
   Attribute ByVal = Attribute::get(C, Attribute::ByVal, Type::getInt32Ty(C));
   EXPECT_FALSE(ByVal < Attribute::get(C, Attribute::ZExt));
   EXPECT_TRUE(ByVal < Align4);
+  EXPECT_FALSE(ByVal < ByVal);
 
   AttributeList ASs[] = {AttributeList::get(C, 2, Attribute::ZExt),
                          AttributeList::get(C, 1, Attribute::SExt)};
@@ -178,9 +179,6 @@ TEST(Attributes, StringRepresentation) {
   // Insufficiently careful printing can result in byval(%mystruct = { i32 })
   Attribute A = Attribute::getWithByValType(C, Ty);
   EXPECT_EQ(A.getAsString(), "byval(%mystruct)");
-
-  A = Attribute::getWithByValType(C, nullptr);
-  EXPECT_EQ(A.getAsString(), "byval");
 
   A = Attribute::getWithByValType(C, Type::getInt32Ty(C));
   EXPECT_EQ(A.getAsString(), "byval(i32)");

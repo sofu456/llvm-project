@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "TestDialect.h"
-#include "mlir/IR/Function.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace mlir;
@@ -15,7 +15,8 @@ using namespace mlir;
 namespace {
 /// This is a symbol test pass that tests the symbol uselist functionality
 /// provided by the symbol table along with erasing from the symbol table.
-struct SymbolUsesPass : public ModulePass<SymbolUsesPass> {
+struct SymbolUsesPass
+    : public PassWrapper<SymbolUsesPass, OperationPass<ModuleOp>> {
   WalkResult operateOnSymbol(Operation *symbol, ModuleOp module,
                              SmallVectorImpl<FuncOp> &deadFunctions) {
     // Test computing uses on a non symboltable op.
@@ -59,13 +60,13 @@ struct SymbolUsesPass : public ModulePass<SymbolUsesPass> {
     return WalkResult::advance();
   }
 
-  void runOnModule() override {
-    auto module = getModule();
+  void runOnOperation() override {
+    auto module = getOperation();
 
     // Walk nested symbols.
     SmallVector<FuncOp, 4> deadFunctions;
     module.getBodyRegion().walk([&](Operation *nestedOp) {
-      if (SymbolTable::isSymbol(nestedOp))
+      if (isa<SymbolOpInterface>(nestedOp))
         return operateOnSymbol(nestedOp, module, deadFunctions);
       return WalkResult::advance();
     });
@@ -86,18 +87,23 @@ struct SymbolUsesPass : public ModulePass<SymbolUsesPass> {
 
 /// This is a symbol test pass that tests the symbol use replacement
 /// functionality provided by the symbol table.
-struct SymbolReplacementPass : public ModulePass<SymbolReplacementPass> {
-  void runOnModule() override {
-    auto module = getModule();
+struct SymbolReplacementPass
+    : public PassWrapper<SymbolReplacementPass, OperationPass<ModuleOp>> {
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
 
-    // Walk nested functions and modules.
+    // Don't try to replace if we can't collect symbol uses.
+    if (!SymbolTable::getSymbolUses(&module.getBodyRegion()))
+      return;
+
+    SymbolTableCollection symbolTable;
+    SymbolUserMap symbolUsers(symbolTable, module);
     module.getBodyRegion().walk([&](Operation *nestedOp) {
       StringAttr newName = nestedOp->getAttrOfType<StringAttr>("sym.new_name");
       if (!newName)
         return;
-      if (succeeded(SymbolTable::replaceAllSymbolUses(
-              nestedOp, newName.getValue(), &module.getBodyRegion())))
-        SymbolTable::setSymbolName(nestedOp, newName.getValue());
+      symbolUsers.replaceAllUsesWith(nestedOp, newName.getValue());
+      SymbolTable::setSymbolName(nestedOp, newName.getValue());
     });
   }
 };

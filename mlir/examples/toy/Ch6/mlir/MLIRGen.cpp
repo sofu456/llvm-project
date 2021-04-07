@@ -15,13 +15,12 @@
 #include "toy/AST.h"
 #include "toy/Dialect.h"
 
-#include "mlir/Analysis/Verifier.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/Function.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
-#include "mlir/IR/Module.h"
-#include "mlir/IR/StandardTypes.h"
+#include "mlir/IR/Verifier.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopedHashTable.h"
@@ -94,7 +93,7 @@ private:
 
   /// Helper conversion for a Toy AST location to an MLIR location.
   mlir::Location loc(Location loc) {
-    return builder.getFileLineColLoc(builder.getIdentifier(*loc.file), loc.line,
+    return mlir::FileLineColLoc::get(builder.getIdentifier(*loc.file), loc.line,
                                      loc.col);
   }
 
@@ -137,10 +136,10 @@ private:
     auto protoArgs = funcAST.getProto()->getArgs();
 
     // Declare all the function arguments in the symbol table.
-    for (const auto &name_value :
+    for (const auto nameValue :
          llvm::zip(protoArgs, entryBlock.getArguments())) {
-      if (failed(declare(std::get<0>(name_value)->getName(),
-                         std::get<1>(name_value))))
+      if (failed(declare(std::get<0>(nameValue)->getName(),
+                         std::get<1>(nameValue))))
         return nullptr;
     }
 
@@ -172,7 +171,7 @@ private:
 
     // If this function isn't main, then set the visibility to private.
     if (funcAST.getProto()->getName() != "main")
-      function.setVisibility(mlir::FuncOp::Visibility::Private);
+      function.setPrivate();
 
     return function;
   }
@@ -317,7 +316,7 @@ private:
       operands.push_back(arg);
     }
 
-    // Builting calls have their custom operation, meaning this is a
+    // Builtin calls have their custom operation, meaning this is a
     // straightforward emission.
     if (callee == "transpose") {
       if (call.getArgs().size() != 1) {
@@ -328,9 +327,9 @@ private:
       return builder.create<TransposeOp>(location, operands[0]);
     }
 
-    // Otherwise this is a call to a user-defined function. Calls to ser-defined
-    // functions are mapped to a custom call that takes the callee name as an
-    // attribute.
+    // Otherwise this is a call to a user-defined function. Calls to
+    // user-defined functions are mapped to a custom call that takes the callee
+    // name as an attribute.
     return builder.create<GenericCallOp>(location, callee, operands);
   }
 

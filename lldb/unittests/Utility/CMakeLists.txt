@@ -29,6 +29,7 @@ add_lldb_unittest(UtilityTests
   StatusTest.cpp
   StreamTeeTest.cpp
   StreamTest.cpp
+  StringExtractorGDBRemoteTest.cpp
   StringExtractorTest.cpp
   StringLexerTest.cpp
   StringListTest.cpp
@@ -42,6 +43,7 @@ add_lldb_unittest(UtilityTests
   UUIDTest.cpp
   VASprintfTest.cpp
   VMRangeTest.cpp
+  XcodeSDKTest.cpp
 
   LINK_LIBS
       lldbUtility

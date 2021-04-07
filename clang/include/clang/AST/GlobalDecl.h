@@ -32,6 +32,7 @@ enum class DynamicInitKind : unsigned {
   NoStub = 0,
   Initializer,
   AtExit,
+  GlobalArrayDestructor
 };
 
 enum class KernelReferenceKind : unsigned {
@@ -150,9 +151,8 @@ public:
   }
 
   static KernelReferenceKind getDefaultKernelReference(const FunctionDecl *D) {
-    return D->getASTContext().getLangOpts().CUDAIsDevice
-               ? KernelReferenceKind::Kernel
-               : KernelReferenceKind::Stub;
+    return D->getLangOpts().CUDAIsDevice ? KernelReferenceKind::Kernel
+                                         : KernelReferenceKind::Stub;
   }
 
   GlobalDecl getWithDecl(const Decl *D) {

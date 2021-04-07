@@ -56,6 +56,7 @@ class AddressBreakpointTestCase(TestBase):
         launch_info = lldb.SBLaunchInfo(None)
         flags = launch_info.GetLaunchFlags()
         flags &= ~lldb.eLaunchFlagDisableASLR
+        flags &= lldb.eLaunchFlagInheritTCCFromParent
         launch_info.SetLaunchFlags(flags)
 
         error = lldb.SBError()
@@ -66,8 +67,8 @@ class AddressBreakpointTestCase(TestBase):
         # Did we hit our breakpoint?
         from lldbsuite.test.lldbutil import get_threads_stopped_at_breakpoint
         threads = get_threads_stopped_at_breakpoint(process, breakpoint)
-        self.assertTrue(
-            len(threads) == 1,
+        self.assertEqual(
+            len(threads), 1,
             "There should be a thread stopped at our breakpoint")
 
         # The hit count for the breakpoint should be 1.
@@ -83,8 +84,8 @@ class AddressBreakpointTestCase(TestBase):
         self.assertTrue(process, PROCESS_IS_VALID)
 
         thread = get_threads_stopped_at_breakpoint(process, breakpoint)
-        self.assertTrue(
-            len(threads) == 1,
+        self.assertEqual(
+            len(threads), 1,
             "There should be a thread stopped at our breakpoint")
 
         # The hit count for the breakpoint should now be 2.

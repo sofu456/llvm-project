@@ -211,9 +211,9 @@ namespace DtorErrors {
   };
 
   struct T {};
-  T t1 = t1.T::~T<int>; // expected-error {{destructor name 'T' does not refer to a template}} expected-error {{expected '(' for function-style cast or type construction}} expected-error {{expected expression}}
+  T t1 = t1.T::~T<int>; // expected-error {{destructor name 'T' does not refer to a template}}
   // Emit the same diagnostic as for the previous case, plus something about ~.
-  T t2 = t2.~T::T<int>; // expected-error {{'~' in destructor name should be after nested name specifier}} expected-error {{destructor name 'T' does not refer to a template}} expected-error {{expected '(' for function-style cast or type construction}} expected-error {{expected expression}}
+  T t2 = t2.~T::T<int>; // expected-error {{'~' in destructor name should be after nested name specifier}} expected-error {{destructor name 'T' does not refer to a template}}
 }
 
 namespace BadFriend {
@@ -229,34 +229,34 @@ namespace BadFriend {
 class PR20760_a {
   int a = ); // expected-error {{expected expression}}
 #if __cplusplus <= 199711L
-  // expected-warning@-2 {{in-class initialization of non-static data member is a C++11 extension}}
+  // expected-warning@-2 {{default member initializer for non-static data member is a C++11 extension}}
 #endif
 
   int b = }; // expected-error {{expected expression}}
 #if __cplusplus <= 199711L
-  // expected-warning@-2 {{in-class initialization of non-static data member is a C++11 extension}}
+  // expected-warning@-2 {{default member initializer for non-static data member is a C++11 extension}}
 #endif
 
   int c = ]; // expected-error {{expected expression}}
 #if __cplusplus <= 199711L
-  // expected-warning@-2 {{in-class initialization of non-static data member is a C++11 extension}}
+  // expected-warning@-2 {{default member initializer for non-static data member is a C++11 extension}}
 #endif
 
 };
 class PR20760_b {
   int d = d); // expected-error {{expected ';'}}
 #if __cplusplus <= 199711L
-  // expected-warning@-2 {{in-class initialization of non-static data member is a C++11 extension}}
+  // expected-warning@-2 {{default member initializer for non-static data member is a C++11 extension}}
 #endif
 
   int e = d]; // expected-error {{expected ';'}}
 #if __cplusplus <= 199711L
-  // expected-warning@-2 {{in-class initialization of non-static data member is a C++11 extension}}
+  // expected-warning@-2 {{default member initializer for non-static data member is a C++11 extension}}
 #endif
 
   int f = d // expected-error {{expected ';'}}
 #if __cplusplus <= 199711L
-  // expected-warning@-2 {{in-class initialization of non-static data member is a C++11 extension}}
+  // expected-warning@-2 {{default member initializer for non-static data member is a C++11 extension}}
 #endif
 
 };
@@ -296,6 +296,11 @@ namespace ArrayMemberAccess {
     // OK: a template-id.
     a->f<int>();
   }
+}
+
+namespace UndeclaredBaseTemplate {
+  template<class> struct imp;
+  template<class T> struct is_member_function_pointer : undeclared<imp<T>::member> {}; // expected-error {{unknown template name 'undeclared'}}
 }
 
 // PR11109 must appear at the end of the source file

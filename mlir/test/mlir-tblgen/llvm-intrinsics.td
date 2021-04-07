@@ -5,7 +5,7 @@
 // writing a local test source. We filter out platform-specific intrinsic
 // includes from the main file to avoid unnecessary dependencies and decrease
 // the test cost. The command-line flags further ensure a specific intrinsic is
-// processed and we only check the ouptut below.
+// processed and we only check the output below.
 // We also verify emission of type specialization for overloadable intrinsics.
 //
 // RUN: cat %S/../../../llvm/include/llvm/IR/Intrinsics.td \
@@ -17,13 +17,36 @@
 // CHECK: LLVM_IntrOp<"ptrmask
 // The result of this intrinsic result is overloadable.
 // CHECK: [0]
-// Both its operands are overloadable.
-// CHECK: [0, 1]
-// It has no additional traits.
-// CHECK: []
+// The second operand is overloadable, but the first operand needs to
+// match the result type.
+// CHECK: [1]
+// It has no side effects.
+// CHECK: [NoSideEffect]
 // It has a result.
-// CHECK: 1>
+// CHECK: 1,
+// It does not require an access group.
+// CHECK: 0>
 // CHECK: Arguments<(ins LLVM_Type, LLVM_Type
+
+//---------------------------------------------------------------------------//
+
+// This checks that we can define an op that takes in an access group metadata.
+//
+// RUN: cat %S/../../../llvm/include/llvm/IR/Intrinsics.td \
+// RUN: | grep -v "llvm/IR/Intrinsics" \
+// RUN: | mlir-tblgen -gen-llvmir-intrinsics -I %S/../../../llvm/include/ --llvmir-intrinsics-filter=ptrmask --llvmir-intrinsics-access-group-regexp=ptrmask \
+// RUN: | FileCheck --check-prefix=GROUPS %s
+
+// GROUPS-LABEL: def LLVM_ptrmask
+// GROUPS: LLVM_IntrOp<"ptrmask
+// It has no side effects.
+// GROUPS: [NoSideEffect]
+// It has a result.
+// GROUPS: 1,
+// It requires generation of an access group LLVM metadata.
+// GROUPS: 1>
+// It has an access group attribute.
+// GROUPS: OptionalAttr<SymbolRefArrayAttr>:$access_groups
 
 //---------------------------------------------------------------------------//
 

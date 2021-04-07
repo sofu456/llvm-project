@@ -1,53 +1,75 @@
-add_llvm_library(MLIRTestTransforms
-  TestAllReduceLowering.cpp
+# Exclude tests from libMLIR.so
+add_mlir_library(MLIRTestTransforms
+  TestAffineLoopParametricTiling.cpp
+  TestExpandTanh.cpp
   TestCallGraph.cpp
+  TestDecomposeCallGraphTypes.cpp
   TestConstantFold.cpp
+  TestConvVectorization.cpp
+  TestConvertCallOp.cpp
   TestConvertGPUKernelToCubin.cpp
+  TestConvertGPUKernelToHsaco.cpp
+  TestDataLayoutQuery.cpp
   TestDominance.cpp
+  TestDynamicPipeline.cpp
+  TestComposeSubView.cpp
   TestLoopFusion.cpp
   TestGpuMemoryPromotion.cpp
   TestGpuParallelLoopMapping.cpp
+  TestGpuRewrite.cpp
   TestInlining.cpp
+  TestLinalgCodegenStrategy.cpp
+  TestLinalgElementwiseFusion.cpp
+  TestLinalgFusionTransforms.cpp
+  TestLinalgHoisting.cpp
   TestLinalgTransforms.cpp
   TestLiveness.cpp
   TestLoopMapping.cpp
   TestLoopParametricTiling.cpp
+  TestLoopUnrolling.cpp
+  TestNumberOfExecutions.cpp
   TestOpaqueLoc.cpp
+  TestPolynomialApproximation.cpp
   TestMemRefBoundCheck.cpp
   TestMemRefDependenceCheck.cpp
   TestMemRefStrideCalculation.cpp
-  TestVectorToLoopsConversion.cpp
+  TestSCFUtils.cpp
+  TestSparsification.cpp
   TestVectorTransforms.cpp
+
+  EXCLUDE_FROM_LIBMLIR
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Transforms
 
   DEPENDS
   MLIRStandardOpsIncGen
-  MLIRTestLinalgTransformPatternsIncGen
-  MLIRTestVectorTransformPatternsIncGen
-)
 
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../TestDialect)
-include_directories(${CMAKE_CURRENT_BINARY_DIR}/../TestDialect)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../DeclarativeTransforms)
-include_directories(${CMAKE_CURRENT_BINARY_DIR}/../DeclarativeTransforms)
-
-target_link_libraries(MLIRTestTransforms
-  PUBLIC
+  LINK_LIBS PUBLIC
   MLIRAffine
   MLIRAnalysis
   MLIREDSC
   MLIRGPU
-  MLIRGPUtoCUDATransforms
-  MLIRLinalgOps
-  MLIRLinalgTransforms
-  MLIRLoopOps
   MLIRGPU
+  MLIRGPUToGPURuntimeTransforms
+  MLIRLinalg
+  MLIRLinalgTransforms
+  MLIRLLVMToLLVMIRTranslation
+  MLIRMathTransforms
+  MLIRNVVMIR
+  MLIRNVVMToLLVMIRTranslation
   MLIRPass
-  MLIRStandardToStandard
+  MLIRROCDLIR
+  MLIRROCDLToLLVMIRTranslation
+  MLIRSCF
+  MLIRSCFTransforms
+  MLIRStandardOpsTransforms
+  MLIRTargetLLVMIRExport
   MLIRTestDialect
   MLIRTransformUtils
-  MLIRVectorToLoops
   MLIRVector
+  MLIRVectorToSCF
   )
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../Dialect/Test)
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/../Dialect/Test)

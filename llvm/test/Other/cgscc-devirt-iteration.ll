@@ -8,6 +8,9 @@
 ; RUN: opt -aa-pipeline=basic-aa -passes='cgscc(devirt<1>(function-attrs,function(gvn,instcombine)))' -S < %s | FileCheck %s --check-prefix=CHECK --check-prefix=AFTER --check-prefix=AFTER1
 ; RUN: opt -aa-pipeline=basic-aa -passes='cgscc(devirt<2>(function-attrs,function(gvn,instcombine)))' -S < %s | FileCheck %s --check-prefix=CHECK --check-prefix=AFTER --check-prefix=AFTER2
 ;
+; RUN: not --crash opt -abort-on-max-devirt-iterations-reached -aa-pipeline=basic-aa -passes='cgscc(devirt<1>(function-attrs,function(gvn,instcombine)))' -S < %s
+; RUN: opt -abort-on-max-devirt-iterations-reached -aa-pipeline=basic-aa -passes='cgscc(devirt<2>(function-attrs,function(gvn,instcombine)))' -S < %s
+;
 ; We also verify that the real O2 pipeline catches these cases.
 ; RUN: opt -aa-pipeline=basic-aa -passes='default<O2>' -S < %s | FileCheck %s --check-prefix=CHECK --check-prefix=AFTER --check-prefix=AFTER2
 
@@ -25,7 +28,7 @@ declare void @unknown()
 
 define void @test1() {
 ; BEFORE-NOT: Function Attrs
-; AFTER: Function Attrs: readnone
+; AFTER: Function Attrs: nosync readnone
 ; CHECK-LABEL: define void @test1()
 entry:
   %fptr = alloca void ()*
@@ -54,7 +57,7 @@ declare void @readnone_with_arg(void ()**) readnone
 define void @test2_a(void ()** %ignore) {
 ; BEFORE-NOT: Function Attrs
 ; AFTER1: Function Attrs: readonly
-; AFTER2: Function Attrs: readnone
+; AFTER2: Function Attrs: nosync readnone
 ; BEFORE: define void @test2_a(void ()** %ignore)
 ; AFTER: define void @test2_a(void ()** readnone %ignore)
 entry:
@@ -75,7 +78,7 @@ entry:
 define void @test2_b() {
 ; BEFORE-NOT: Function Attrs
 ; AFTER1: Function Attrs: readonly
-; AFTER2: Function Attrs: readnone
+; AFTER2: Function Attrs: nosync readnone
 ; CHECK-LABEL: define void @test2_b()
 entry:
   %f2ptr = alloca void ()*

@@ -15,7 +15,6 @@
 #define LLVM_LIB_CODEGEN_MIRPARSER_MILEXER_H
 
 #include "llvm/ADT/APSInt.h"
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include <string>
 
@@ -75,6 +74,7 @@ struct MIToken {
     kw_exact,
     kw_nofpexcept,
     kw_debug_location,
+    kw_debug_instr_number,
     kw_cfi_same_value,
     kw_cfi_offset,
     kw_cfi_rel_offset,
@@ -104,6 +104,7 @@ struct MIToken {
     kw_non_temporal,
     kw_invariant,
     kw_align,
+    kw_basealign,
     kw_addrspace,
     kw_stack,
     kw_got,
@@ -125,6 +126,7 @@ struct MIToken {
     kw_heap_alloc_marker,
     kw_bbsections,
     kw_unknown_size,
+    kw_unknown_address,
 
     // Named metadata keywords
     md_tbaa,

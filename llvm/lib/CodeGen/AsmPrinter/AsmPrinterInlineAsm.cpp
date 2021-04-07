@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
@@ -38,54 +39,12 @@ using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
 
-/// srcMgrDiagHandler - This callback is invoked when the SourceMgr for an
-/// inline asm has an error in it.  diagInfo is a pointer to the SrcMgrDiagInfo
-/// struct above.
-static void srcMgrDiagHandler(const SMDiagnostic &Diag, void *diagInfo) {
-  AsmPrinter::SrcMgrDiagInfo *DiagInfo =
-      static_cast<AsmPrinter::SrcMgrDiagInfo *>(diagInfo);
-  assert(DiagInfo && "Diagnostic context not passed down?");
-
-  // Look up a LocInfo for the buffer this diagnostic is coming from.
-  unsigned BufNum = DiagInfo->SrcMgr.FindBufferContainingLoc(Diag.getLoc());
-  const MDNode *LocInfo = nullptr;
-  if (BufNum > 0 && BufNum <= DiagInfo->LocInfos.size())
-    LocInfo = DiagInfo->LocInfos[BufNum-1];
-
-  // If the inline asm had metadata associated with it, pull out a location
-  // cookie corresponding to which line the error occurred on.
-  unsigned LocCookie = 0;
-  if (LocInfo) {
-    unsigned ErrorLine = Diag.getLineNo()-1;
-    if (ErrorLine >= LocInfo->getNumOperands())
-      ErrorLine = 0;
-
-    if (LocInfo->getNumOperands() != 0)
-      if (const ConstantInt *CI =
-              mdconst::dyn_extract<ConstantInt>(LocInfo->getOperand(ErrorLine)))
-        LocCookie = CI->getZExtValue();
-  }
-
-  DiagInfo->DiagHandler(Diag, DiagInfo->DiagContext, LocCookie);
-}
-
 unsigned AsmPrinter::addInlineAsmDiagBuffer(StringRef AsmStr,
                                             const MDNode *LocMDNode) const {
-  if (!DiagInfo) {
-    DiagInfo = std::make_unique<SrcMgrDiagInfo>();
-
-    MCContext &Context = MMI->getContext();
-    Context.setInlineSourceManager(&DiagInfo->SrcMgr);
-
-    LLVMContext &LLVMCtx = MMI->getModule()->getContext();
-    if (LLVMCtx.getInlineAsmDiagnosticHandler()) {
-      DiagInfo->DiagHandler = LLVMCtx.getInlineAsmDiagnosticHandler();
-      DiagInfo->DiagContext = LLVMCtx.getInlineAsmDiagnosticContext();
-      DiagInfo->SrcMgr.setDiagHandler(srcMgrDiagHandler, DiagInfo.get());
-    }
-  }
-
-  SourceMgr &SrcMgr = DiagInfo->SrcMgr;
+  MCContext &Context = MMI->getContext();
+  Context.initInlineSourceManager();
+  SourceMgr &SrcMgr = *Context.getInlineSourceManager();
+  std::vector<const MDNode *> &LocInfos = Context.getLocInfos();
 
   std::unique_ptr<MemoryBuffer> Buffer;
   // The inline asm source manager will outlive AsmStr, so make a copy of the
@@ -97,8 +56,8 @@ unsigned AsmPrinter::addInlineAsmDiagBuffer(StringRef AsmStr,
 
   // Store LocMDNode in DiagInfo, using BufNum as an identifier.
   if (LocMDNode) {
-    DiagInfo->LocInfos.resize(BufNum);
-    DiagInfo->LocInfos[BufNum - 1] = LocMDNode;
+    LocInfos.resize(BufNum);
+    LocInfos[BufNum - 1] = LocMDNode;
   }
 
   return BufNum;
@@ -133,10 +92,11 @@ void AsmPrinter::emitInlineAsm(StringRef Str, const MCSubtargetInfo &STI,
   }
 
   unsigned BufNum = addInlineAsmDiagBuffer(Str, LocMDNode);
-  DiagInfo->SrcMgr.setIncludeDirs(MCOptions.IASSearchPaths);
+  SourceMgr &SrcMgr = *MMI->getContext().getInlineSourceManager();
+  SrcMgr.setIncludeDirs(MCOptions.IASSearchPaths);
 
-  std::unique_ptr<MCAsmParser> Parser(createMCAsmParser(
-          DiagInfo->SrcMgr, OutContext, *OutStreamer, *MAI, BufNum));
+  std::unique_ptr<MCAsmParser> Parser(
+      createMCAsmParser(SrcMgr, OutContext, *OutStreamer, *MAI, BufNum));
 
   // Do not use assembler-level information for parsing inline assembly.
   OutStreamer->setUseAssemblerInfoForParsing(false);
@@ -146,6 +106,7 @@ void AsmPrinter::emitInlineAsm(StringRef Str, const MCSubtargetInfo &STI,
   // we only need MCInstrInfo for asm parsing. We create one unconditionally
   // because it's not subtarget dependent.
   std::unique_ptr<MCInstrInfo> MII(TM.getTarget().createMCInstrInfo());
+  assert(MII && "Failed to create instruction info");
   std::unique_ptr<MCTargetAsmParser> TAP(TM.getTarget().createMCAsmParser(
       STI, *Parser, *MII, MCOptions));
   if (!TAP)
@@ -160,12 +121,9 @@ void AsmPrinter::emitInlineAsm(StringRef Str, const MCSubtargetInfo &STI,
 
   emitInlineAsmStart();
   // Don't implicitly switch to the text section before the asm.
-  int Res = Parser->Run(/*NoInitialTextSection*/ true,
-                        /*NoFinalize*/ true);
+  (void)Parser->Run(/*NoInitialTextSection*/ true,
+                    /*NoFinalize*/ true);
   emitInlineAsmEnd(STI, &TAP->getSTI());
-
-  if (Res && !DiagInfo->DiagHandler)
-    report_fatal_error("Error parsing inline asm\n");
 }
 
 static void EmitMSInlineAsmStr(const char *AsmStr, const MachineInstr *MI,
@@ -232,7 +190,8 @@ static void EmitMSInlineAsmStr(const char *AsmStr, const MachineInstr *MI,
 
       const char *IDStart = LastEmitted;
       const char *IDEnd = IDStart;
-      while (*IDEnd >= '0' && *IDEnd <= '9') ++IDEnd;
+      while (isDigit(*IDEnd))
+        ++IDEnd;
 
       unsigned Val;
       if (StringRef(IDStart, IDEnd-IDStart).getAsInteger(10, Val))
@@ -397,7 +356,8 @@ static void EmitGCCInlineAsmStr(const char *AsmStr, const MachineInstr *MI,
 
       const char *IDStart = LastEmitted;
       const char *IDEnd = IDStart;
-      while (*IDEnd >= '0' && *IDEnd <= '9') ++IDEnd;
+      while (isDigit(*IDEnd))
+        ++IDEnd;
 
       unsigned Val;
       if (StringRef(IDStart, IDEnd-IDStart).getAsInteger(10, Val))
@@ -547,39 +507,41 @@ void AsmPrinter::emitInlineAsm(const MachineInstr *MI) const {
     EmitMSInlineAsmStr(AsmStr, MI, MMI, AP, LocCookie, OS);
 
   // Emit warnings if we use reserved registers on the clobber list, as
-  // that might give surprising results.
-  std::vector<std::string> RestrRegs;
+  // that might lead to undefined behaviour.
+  SmallVector<Register, 8> RestrRegs;
+  const TargetRegisterInfo *TRI = MF->getSubtarget().getRegisterInfo();
   // Start with the first operand descriptor, and iterate over them.
   for (unsigned I = InlineAsm::MIOp_FirstOperand, NumOps = MI->getNumOperands();
        I < NumOps; ++I) {
     const MachineOperand &MO = MI->getOperand(I);
-    if (MO.isImm()) {
-      unsigned Flags = MO.getImm();
-      const TargetRegisterInfo *TRI = MF->getSubtarget().getRegisterInfo();
-      if (InlineAsm::getKind(Flags) == InlineAsm::Kind_Clobber &&
-          !TRI->isAsmClobberable(*MF, MI->getOperand(I + 1).getReg())) {
-        RestrRegs.push_back(TRI->getName(MI->getOperand(I + 1).getReg()));
-      }
-      // Skip to one before the next operand descriptor, if it exists.
-      I += InlineAsm::getNumOperandRegisters(Flags);
+    if (!MO.isImm())
+      continue;
+    unsigned Flags = MO.getImm();
+    if (InlineAsm::getKind(Flags) == InlineAsm::Kind_Clobber) {
+      Register Reg = MI->getOperand(I + 1).getReg();
+      if (!TRI->isAsmClobberable(*MF, Reg))
+        RestrRegs.push_back(Reg);
     }
+    // Skip to one before the next operand descriptor, if it exists.
+    I += InlineAsm::getNumOperandRegisters(Flags);
   }
 
   if (!RestrRegs.empty()) {
     unsigned BufNum = addInlineAsmDiagBuffer(OS.str(), LocMD);
-    auto &SrcMgr = DiagInfo->SrcMgr;
+    auto &SrcMgr = *MMI->getContext().getInlineSourceManager();
     SMLoc Loc = SMLoc::getFromPointer(
         SrcMgr.getMemoryBuffer(BufNum)->getBuffer().begin());
 
     std::string Msg = "inline asm clobber list contains reserved registers: ";
-    for (auto I = RestrRegs.begin(), E = RestrRegs.end(); I != E; I++) {
-      if(I != RestrRegs.begin())
-        Msg += ", ";
-      Msg += *I;
+    ListSeparator LS;
+    for (const Register &RR : RestrRegs) {
+      Msg += LS;
+      Msg += TRI->getName(RR);
     }
-    std::string Note = "Reserved registers on the clobber list may not be "
-                "preserved across the asm statement, and clobbering them may "
-                "lead to undefined behaviour.";
+    const char *Note =
+        "Reserved registers on the clobber list may not be "
+        "preserved across the asm statement, and clobbering them may "
+        "lead to undefined behaviour.";
     SrcMgr.PrintMessage(Loc, SourceMgr::DK_Warning, Msg);
     SrcMgr.PrintMessage(Loc, SourceMgr::DK_Note, Note);
   }

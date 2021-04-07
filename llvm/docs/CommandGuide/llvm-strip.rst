@@ -39,7 +39,7 @@ multiple file formats.
 
  Remove most local symbols from the output. Different file formats may limit
  this to a subset of the local symbols. For example, file and section symbols in
- ELF objects will not be discarded.
+ ELF objects will not be discarded. Additionally, remove all debug sections.
 
 .. option::  --enable-deterministic-archives, -D
 
@@ -180,6 +180,10 @@ them.
  Remove from the output all section headers and all section data not within
  segments. Note that many tools will not be able to use an object without
  section headers.
+
+.. option:: -T
+
+ Remove Swift symbols.
 
 EXIT STATUS
 -----------

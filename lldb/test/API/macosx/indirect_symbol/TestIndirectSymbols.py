@@ -19,7 +19,6 @@ class TestIndirectFunctions(TestBase):
         self.main_source = "main.c"
 
     @skipUnlessDarwin
-    @expectedFailureAll(oslist=no_match(["macosx"]), bugnumber="rdar://55952764")
     @add_test_categories(['pyapi'])
     def test_with_python_api(self):
         """Test stepping and setting breakpoints in indirect and re-exported symbols."""
@@ -29,10 +28,9 @@ class TestIndirectFunctions(TestBase):
         target = self.dbg.CreateTarget(exe)
         self.assertTrue(target, VALID_TARGET)
 
-        if self.platformIsDarwin():
-            lib1 = self.getBuildArtifact('libindirect.dylib')
-            lib2 = self.getBuildArtifact('libreexport.dylib')
-            self.registerSharedLibrariesWithTarget(target, [lib1, lib2])
+        lib1 = self.getBuildArtifact('libindirect.dylib')
+        lib2 = self.getBuildArtifact('libreexport.dylib')
+        self.registerSharedLibrariesWithTarget(target, [lib1, lib2])
 
         self.main_source_spec = lldb.SBFileSpec(self.main_source)
 
@@ -73,12 +71,12 @@ class TestIndirectFunctions(TestBase):
         # symbol:
 
         threads = lldbutil.continue_to_breakpoint(process, break_indirect)
-        self.assertTrue(
-            len(threads) == 1,
+        self.assertEqual(
+            len(threads), 1,
             "Stopped at breakpoint in indirect function.")
         curr_function = thread.GetFrameAtIndex(0).GetFunctionName()
-        self.assertTrue(
-            curr_function == "call_through_indirect_hidden",
+        self.assertEqual(
+            curr_function, "call_through_indirect_hidden",
             "Stepped into indirect symbols.")
 
         # Delete this breakpoint so it won't get in the way:
@@ -92,8 +90,8 @@ class TestIndirectFunctions(TestBase):
         # symbol:
         thread.StepInto()
         curr_function = thread.GetFrameAtIndex(0).GetFunctionName()
-        self.assertTrue(
-            curr_function == "call_through_indirect_hidden",
+        self.assertEqual(
+            curr_function, "call_through_indirect_hidden",
             "Stepped into indirect symbols.")
 
         # And the last bit is to set a breakpoint on the re-exported symbol and
@@ -106,10 +104,10 @@ class TestIndirectFunctions(TestBase):
         # symbol:
 
         threads = lldbutil.continue_to_breakpoint(process, break_reexported)
-        self.assertTrue(
-            len(threads) == 1,
+        self.assertEqual(
+            len(threads), 1,
             "Stopped at breakpoint in reexported function target.")
         curr_function = thread.GetFrameAtIndex(0).GetFunctionName()
-        self.assertTrue(
-            curr_function == "call_through_indirect_hidden",
+        self.assertEqual(
+            curr_function, "call_through_indirect_hidden",
             "Stepped into indirect symbols.")

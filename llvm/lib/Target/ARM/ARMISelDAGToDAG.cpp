@@ -297,6 +297,8 @@ private:
   /// Try to select SBFX/UBFX instructions for ARM.
   bool tryV6T2BitfieldExtractOp(SDNode *N, bool isSigned);
 
+  bool tryInsertVectorElt(SDNode *N);
+
   // Select special operations if node forms integer ABS pattern
   bool tryABSOp(SDNode *N);
 
@@ -1191,8 +1193,8 @@ bool ARMDAGToDAGISel::SelectThumbAddrModeSP(SDValue N,
     // Only multiples of 4 are allowed for the offset, so the frame object
     // alignment must be at least 4.
     MachineFrameInfo &MFI = MF->getFrameInfo();
-    if (MFI.getObjectAlignment(FI) < 4)
-      MFI.setObjectAlignment(FI, 4);
+    if (MFI.getObjectAlign(FI) < Align(4))
+      MFI.setObjectAlignment(FI, Align(4));
     Base = CurDAG->getTargetFrameIndex(
         FI, TLI->getPointerTy(CurDAG->getDataLayout()));
     OffImm = CurDAG->getTargetConstant(0, SDLoc(N), MVT::i32);
@@ -1215,9 +1217,9 @@ bool ARMDAGToDAGISel::SelectThumbAddrModeSP(SDValue N,
       if (RHSC * 4 < MFI.getObjectSize(FI)) {
         // For LHS+RHS to result in an offset that's a multiple of 4 the object
         // indexed by the LHS must be 4-byte aligned.
-        if (!MFI.isFixedObjectIndex(FI) && MFI.getObjectAlignment(FI) < 4)
-          MFI.setObjectAlignment(FI, 4);
-        if (MFI.getObjectAlignment(FI) >= 4) {
+        if (!MFI.isFixedObjectIndex(FI) && MFI.getObjectAlign(FI) < Align(4))
+          MFI.setObjectAlignment(FI, Align(4));
+        if (MFI.getObjectAlign(FI) >= Align(4)) {
           Base = CurDAG->getTargetFrameIndex(
               FI, TLI->getPointerTy(CurDAG->getDataLayout()));
           OffImm = CurDAG->getTargetConstant(RHSC, SDLoc(N), MVT::i32);
@@ -1726,7 +1728,7 @@ bool ARMDAGToDAGISel::tryMVEIndexedLoad(SDNode *N) {
   EVT LoadedVT;
   unsigned Opcode = 0;
   bool isSExtLd, isPre;
-  unsigned Align;
+  Align Alignment;
   ARMVCC::VPTCodes Pred;
   SDValue PredReg;
   SDValue Chain, Base, Offset;
@@ -1742,7 +1744,7 @@ bool ARMDAGToDAGISel::tryMVEIndexedLoad(SDNode *N) {
     Chain = LD->getChain();
     Base = LD->getBasePtr();
     Offset = LD->getOffset();
-    Align = LD->getAlignment();
+    Alignment = LD->getAlign();
     isSExtLd = LD->getExtensionType() == ISD::SEXTLOAD;
     isPre = (AM == ISD::PRE_INC) || (AM == ISD::PRE_DEC);
     Pred = ARMVCC::None;
@@ -1758,7 +1760,7 @@ bool ARMDAGToDAGISel::tryMVEIndexedLoad(SDNode *N) {
     Chain = LD->getChain();
     Base = LD->getBasePtr();
     Offset = LD->getOffset();
-    Align = LD->getAlignment();
+    Alignment = LD->getAlign();
     isSExtLd = LD->getExtensionType() == ISD::SEXTLOAD;
     isPre = (AM == ISD::PRE_INC) || (AM == ISD::PRE_DEC);
     Pred = ARMVCC::Then;
@@ -1772,7 +1774,7 @@ bool ARMDAGToDAGISel::tryMVEIndexedLoad(SDNode *N) {
   bool CanChangeType = Subtarget->isLittle() && !isa<MaskedLoadSDNode>(N);
 
   SDValue NewOffset;
-  if (Align >= 2 && LoadedVT == MVT::v4i16 &&
+  if (Alignment >= Align(2) && LoadedVT == MVT::v4i16 &&
       SelectT2AddrModeImm7Offset(N, Offset, NewOffset, 1)) {
     if (isSExtLd)
       Opcode = isPre ? ARM::MVE_VLDRHS32_pre : ARM::MVE_VLDRHS32_post;
@@ -1790,12 +1792,12 @@ bool ARMDAGToDAGISel::tryMVEIndexedLoad(SDNode *N) {
       Opcode = isPre ? ARM::MVE_VLDRBS32_pre : ARM::MVE_VLDRBS32_post;
     else
       Opcode = isPre ? ARM::MVE_VLDRBU32_pre : ARM::MVE_VLDRBU32_post;
-  } else if (Align >= 4 &&
+  } else if (Alignment >= Align(4) &&
              (CanChangeType || LoadedVT == MVT::v4i32 ||
               LoadedVT == MVT::v4f32) &&
              SelectT2AddrModeImm7Offset(N, Offset, NewOffset, 2))
     Opcode = isPre ? ARM::MVE_VLDRWU32_pre : ARM::MVE_VLDRWU32_post;
-  else if (Align >= 2 &&
+  else if (Alignment >= Align(2) &&
            (CanChangeType || LoadedVT == MVT::v8i16 ||
             LoadedVT == MVT::v8f16) &&
            SelectT2AddrModeImm7Offset(N, Offset, NewOffset, 1))
@@ -2078,6 +2080,7 @@ void ARMDAGToDAGISel::SelectVLD(SDNode *N, bool isUpdating, unsigned NumVecs,
     // Double-register operations:
   case MVT::v8i8:  OpcodeIndex = 0; break;
   case MVT::v4f16:
+  case MVT::v4bf16:
   case MVT::v4i16: OpcodeIndex = 1; break;
   case MVT::v2f32:
   case MVT::v2i32: OpcodeIndex = 2; break;
@@ -2085,6 +2088,7 @@ void ARMDAGToDAGISel::SelectVLD(SDNode *N, bool isUpdating, unsigned NumVecs,
     // Quad-register operations:
   case MVT::v16i8: OpcodeIndex = 0; break;
   case MVT::v8f16:
+  case MVT::v8bf16:
   case MVT::v8i16: OpcodeIndex = 1; break;
   case MVT::v4f32:
   case MVT::v4i32: OpcodeIndex = 2; break;
@@ -2221,6 +2225,7 @@ void ARMDAGToDAGISel::SelectVST(SDNode *N, bool isUpdating, unsigned NumVecs,
     // Double-register operations:
   case MVT::v8i8:  OpcodeIndex = 0; break;
   case MVT::v4f16:
+  case MVT::v4bf16:
   case MVT::v4i16: OpcodeIndex = 1; break;
   case MVT::v2f32:
   case MVT::v2i32: OpcodeIndex = 2; break;
@@ -2228,6 +2233,7 @@ void ARMDAGToDAGISel::SelectVST(SDNode *N, bool isUpdating, unsigned NumVecs,
     // Quad-register operations:
   case MVT::v16i8: OpcodeIndex = 0; break;
   case MVT::v8f16:
+  case MVT::v8bf16:
   case MVT::v8i16: OpcodeIndex = 1; break;
   case MVT::v4f32:
   case MVT::v4i32: OpcodeIndex = 2; break;
@@ -2389,11 +2395,13 @@ void ARMDAGToDAGISel::SelectVLDSTLane(SDNode *N, bool IsLoad, bool isUpdating,
     // Double-register operations:
   case MVT::v8i8:  OpcodeIndex = 0; break;
   case MVT::v4f16:
+  case MVT::v4bf16:
   case MVT::v4i16: OpcodeIndex = 1; break;
   case MVT::v2f32:
   case MVT::v2i32: OpcodeIndex = 2; break;
     // Quad-register operations:
   case MVT::v8f16:
+  case MVT::v8bf16:
   case MVT::v8i16: OpcodeIndex = 0; break;
   case MVT::v4f32:
   case MVT::v4i32: OpcodeIndex = 1; break;
@@ -2923,6 +2931,8 @@ void ARMDAGToDAGISel::SelectVLDDup(SDNode *N, bool IsIntrinsic,
   case MVT::v8i16:
   case MVT::v4f16:
   case MVT::v8f16:
+  case MVT::v4bf16:
+  case MVT::v8bf16:
                   OpcodeIndex = 1; break;
   case MVT::v2f32:
   case MVT::v2i32:
@@ -3012,6 +3022,97 @@ void ARMDAGToDAGISel::SelectVLDDup(SDNode *N, bool IsIntrinsic,
   if (isUpdating)
     ReplaceUses(SDValue(N, NumVecs + 1), SDValue(VLdDup, 2));
   CurDAG->RemoveDeadNode(N);
+}
+
+bool ARMDAGToDAGISel::tryInsertVectorElt(SDNode *N) {
+  if (!Subtarget->hasMVEIntegerOps())
+    return false;
+
+  SDLoc dl(N);
+
+  // We are trying to use VMOV/VMOVX/VINS to more efficiently lower insert and
+  // extracts of v8f16 and v8i16 vectors. Check that we have two adjacent
+  // inserts of the correct type:
+  SDValue Ins1 = SDValue(N, 0);
+  SDValue Ins2 = N->getOperand(0);
+  EVT VT = Ins1.getValueType();
+  if (Ins2.getOpcode() != ISD::INSERT_VECTOR_ELT || !Ins2.hasOneUse() ||
+      !isa<ConstantSDNode>(Ins1.getOperand(2)) ||
+      !isa<ConstantSDNode>(Ins2.getOperand(2)) ||
+      (VT != MVT::v8f16 && VT != MVT::v8i16) || (Ins2.getValueType() != VT))
+    return false;
+
+  unsigned Lane1 = Ins1.getConstantOperandVal(2);
+  unsigned Lane2 = Ins2.getConstantOperandVal(2);
+  if (Lane2 % 2 != 0 || Lane1 != Lane2 + 1)
+    return false;
+
+  // If the inserted values will be able to use T/B already, leave it to the
+  // existing tablegen patterns. For example VCVTT/VCVTB.
+  SDValue Val1 = Ins1.getOperand(1);
+  SDValue Val2 = Ins2.getOperand(1);
+  if (Val1.getOpcode() == ISD::FP_ROUND || Val2.getOpcode() == ISD::FP_ROUND)
+    return false;
+
+  // Check if the inserted values are both extracts.
+  if ((Val1.getOpcode() == ISD::EXTRACT_VECTOR_ELT ||
+       Val1.getOpcode() == ARMISD::VGETLANEu) &&
+      (Val2.getOpcode() == ISD::EXTRACT_VECTOR_ELT ||
+       Val2.getOpcode() == ARMISD::VGETLANEu) &&
+      isa<ConstantSDNode>(Val1.getOperand(1)) &&
+      isa<ConstantSDNode>(Val2.getOperand(1)) &&
+      (Val1.getOperand(0).getValueType() == MVT::v8f16 ||
+       Val1.getOperand(0).getValueType() == MVT::v8i16) &&
+      (Val2.getOperand(0).getValueType() == MVT::v8f16 ||
+       Val2.getOperand(0).getValueType() == MVT::v8i16)) {
+    unsigned ExtractLane1 = Val1.getConstantOperandVal(1);
+    unsigned ExtractLane2 = Val2.getConstantOperandVal(1);
+
+    // If the two extracted lanes are from the same place and adjacent, this
+    // simplifies into a f32 lane move.
+    if (Val1.getOperand(0) == Val2.getOperand(0) && ExtractLane2 % 2 == 0 &&
+        ExtractLane1 == ExtractLane2 + 1) {
+      SDValue NewExt = CurDAG->getTargetExtractSubreg(
+          ARM::ssub_0 + ExtractLane2 / 2, dl, MVT::f32, Val1.getOperand(0));
+      SDValue NewIns = CurDAG->getTargetInsertSubreg(
+          ARM::ssub_0 + Lane2 / 2, dl, VT, Ins2.getOperand(0),
+          NewExt);
+      ReplaceUses(Ins1, NewIns);
+      return true;
+    }
+
+    // Else v8i16 pattern of an extract and an insert, with a optional vmovx for
+    // extracting odd lanes.
+    if (VT == MVT::v8i16) {
+      SDValue Inp1 = CurDAG->getTargetExtractSubreg(
+          ARM::ssub_0 + ExtractLane1 / 2, dl, MVT::f32, Val1.getOperand(0));
+      SDValue Inp2 = CurDAG->getTargetExtractSubreg(
+          ARM::ssub_0 + ExtractLane2 / 2, dl, MVT::f32, Val2.getOperand(0));
+      if (ExtractLane1 % 2 != 0)
+        Inp1 = SDValue(CurDAG->getMachineNode(ARM::VMOVH, dl, MVT::f32, Inp1), 0);
+      if (ExtractLane2 % 2 != 0)
+        Inp2 = SDValue(CurDAG->getMachineNode(ARM::VMOVH, dl, MVT::f32, Inp2), 0);
+      SDNode *VINS = CurDAG->getMachineNode(ARM::VINSH, dl, MVT::f32, Inp2, Inp1);
+      SDValue NewIns =
+          CurDAG->getTargetInsertSubreg(ARM::ssub_0 + Lane2 / 2, dl, MVT::v4f32,
+                                        Ins2.getOperand(0), SDValue(VINS, 0));
+      ReplaceUses(Ins1, NewIns);
+      return true;
+    }
+  }
+
+  // The inserted values are not extracted - if they are f16 then insert them
+  // directly using a VINS.
+  if (VT == MVT::v8f16) {
+    SDNode *VINS = CurDAG->getMachineNode(ARM::VINSH, dl, MVT::f32, Val2, Val1);
+    SDValue NewIns =
+        CurDAG->getTargetInsertSubreg(ARM::ssub_0 + Lane2 / 2, dl, MVT::v4f32,
+                                      Ins2.getOperand(0), SDValue(VINS, 0));
+    ReplaceUses(Ins1, NewIns);
+    return true;
+  }
+
+  return false;
 }
 
 bool ARMDAGToDAGISel::tryV6T2BitfieldExtractOp(SDNode *N, bool isSigned) {
@@ -3400,7 +3501,7 @@ void ARMDAGToDAGISel::Select(SDNode *N) {
       MachineFunction& MF = CurDAG->getMachineFunction();
       MachineMemOperand *MemOp =
           MF.getMachineMemOperand(MachinePointerInfo::getConstantPool(MF),
-                                  MachineMemOperand::MOLoad, 4, 4);
+                                  MachineMemOperand::MOLoad, 4, Align(4));
 
       CurDAG->setNodeMemRefs(cast<MachineSDNode>(ResNode), {MemOp});
 
@@ -3420,8 +3521,8 @@ void ARMDAGToDAGISel::Select(SDNode *N) {
       // Set the alignment of the frame object to 4, to avoid having to generate
       // more than one ADD
       MachineFrameInfo &MFI = MF->getFrameInfo();
-      if (MFI.getObjectAlignment(FI) < 4)
-        MFI.setObjectAlignment(FI, 4);
+      if (MFI.getObjectAlign(FI) < Align(4))
+        MFI.setObjectAlignment(FI, Align(4));
       CurDAG->SelectNodeTo(N, ARM::tADDframe, MVT::i32, TFI,
                            CurDAG->getTargetConstant(0, dl, MVT::i32));
       return;
@@ -3434,6 +3535,11 @@ void ARMDAGToDAGISel::Select(SDNode *N) {
       CurDAG->SelectNodeTo(N, Opc, MVT::i32, Ops);
       return;
     }
+  }
+  case ISD::INSERT_VECTOR_ELT: {
+    if (tryInsertVectorElt(N))
+      return;
+    break;
   }
   case ISD::SRL:
     if (tryV6T2BitfieldExtractOp(N, false))
@@ -3672,13 +3778,26 @@ void ARMDAGToDAGISel::Select(SDNode *N) {
       return;
     // Other cases are autogenerated.
     break;
-  case ARMISD::WLS:
+  case ARMISD::WLSSETUP: {
+    SDNode *New = CurDAG->getMachineNode(ARM::t2WhileLoopSetup, dl, MVT::i32,
+                                         N->getOperand(0));
+    ReplaceUses(N, New);
+    CurDAG->RemoveDeadNode(N);
+    return;
+  }
+  case ARMISD::WLS: {
+    SDNode *New = CurDAG->getMachineNode(ARM::t2WhileLoopStart, dl, MVT::Other,
+                                         N->getOperand(1), N->getOperand(2),
+                                         N->getOperand(0));
+    ReplaceUses(N, New);
+    CurDAG->RemoveDeadNode(N);
+    return;
+  }
   case ARMISD::LE: {
     SDValue Ops[] = { N->getOperand(1),
                       N->getOperand(2),
                       N->getOperand(0) };
-    unsigned Opc = N->getOpcode() == ARMISD::WLS ?
-      ARM::t2WhileLoopStart : ARM::t2LoopEnd;
+    unsigned Opc = ARM::t2LoopEnd;
     SDNode *New = CurDAG->getMachineNode(Opc, dl, MVT::Other, Ops);
     ReplaceUses(N, New);
     CurDAG->RemoveDeadNode(N);
@@ -4734,6 +4853,29 @@ void ARMDAGToDAGISel::Select(SDNode *N) {
     switch (IntNo) {
     default:
       break;
+
+    // Scalar f32 -> bf16
+    case Intrinsic::arm_neon_vcvtbfp2bf: {
+      SDLoc dl(N);
+      const SDValue &Src = N->getOperand(1);
+      llvm::EVT DestTy = N->getValueType(0);
+      SDValue Pred = getAL(CurDAG, dl);
+      SDValue Reg0 = CurDAG->getRegister(0, MVT::i32);
+      SDValue Ops[] = { Src, Src, Pred, Reg0 };
+      CurDAG->SelectNodeTo(N, ARM::BF16_VCVTB, DestTy, Ops);
+      return;
+    }
+
+    // Vector v4f32 -> v4bf16
+    case Intrinsic::arm_neon_vcvtfp2bf: {
+      SDLoc dl(N);
+      const SDValue &Src = N->getOperand(1);
+      SDValue Pred = getAL(CurDAG, dl);
+      SDValue Reg0 = CurDAG->getRegister(0, MVT::i32);
+      SDValue Ops[] = { Src, Pred, Reg0 };
+      CurDAG->SelectNodeTo(N, ARM::BF16_VCVT, MVT::v4bf16, Ops);
+      return;
+    }
 
     case Intrinsic::arm_mve_urshrl:
       SelectMVE_LongShift(N, ARM::MVE_URSHRL, true, false);

@@ -58,7 +58,7 @@ class TestAllowJIT(TestBase):
 
         # Now use the options:
         result = frame.EvaluateExpression("call_me(10)", options)
-        self.assertTrue(result.GetError().Success(), "expression succeeded")
+        self.assertSuccess(result.GetError())
         self.assertEqual(result.GetValueAsSigned(), 18, "got the right value.")
 
         # Now disallow JIT and make sure it fails:
@@ -69,7 +69,7 @@ class TestAllowJIT(TestBase):
         # Again use it and ensure we fail:
         result = frame.EvaluateExpression("call_me(10)", options)
         self.assertTrue(result.GetError().Fail(), "expression failed with no JIT")
-        self.assertTrue("Can't evaluate the expression without a running target" in result.GetError().GetCString(), "Got right error")
+        self.assertIn("Can't evaluate the expression without a running target", result.GetError().GetCString(), "Got right error")
 
         # Finally set the allow JIT value back to true and make sure that works:
         options.SetAllowJIT(True)
@@ -77,6 +77,6 @@ class TestAllowJIT(TestBase):
 
         # And again, make sure this works:
         result = frame.EvaluateExpression("call_me(10)", options)
-        self.assertTrue(result.GetError().Success(), "expression succeeded")
+        self.assertSuccess(result.GetError())
         self.assertEqual(result.GetValueAsSigned(), 18, "got the right value.")
 

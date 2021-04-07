@@ -57,56 +57,26 @@ THREADLOCAL uptr __hwasan_tls;
 
 namespace __hwasan {
 
-static void ReserveShadowMemoryRange(uptr beg, uptr end, const char *name) {
-  CHECK_EQ((beg % GetMmapGranularity()), 0);
-  CHECK_EQ(((end + 1) % GetMmapGranularity()), 0);
-  uptr size = end - beg + 1;
-  DecreaseTotalMmap(size);  // Don't count the shadow against mmap_limit_mb.
-  if (!MmapFixedNoReserve(beg, size, name)) {
-    Report(
-        "ReserveShadowMemoryRange failed while trying to map 0x%zx bytes. "
-        "Perhaps you're using ulimit -v\n",
-        size);
-    Abort();
-  }
-}
+// With the zero shadow base we can not actually map pages starting from 0.
+// This constant is somewhat arbitrary.
+constexpr uptr kZeroBaseShadowStart = 0;
+constexpr uptr kZeroBaseMaxShadowStart = 1 << 18;
 
 static void ProtectGap(uptr addr, uptr size) {
-  if (!size)
-    return;
-  void *res = MmapFixedNoAccess(addr, size, "shadow gap");
-  if (addr == (uptr)res)
-    return;
-  // A few pages at the start of the address space can not be protected.
-  // But we really want to protect as much as possible, to prevent this memory
-  // being returned as a result of a non-FIXED mmap().
-  if (addr == 0) {
-    uptr step = GetMmapGranularity();
-    while (size > step) {
-      addr += step;
-      size -= step;
-      void *res = MmapFixedNoAccess(addr, size, "shadow gap");
-      if (addr == (uptr)res)
-        return;
-    }
-  }
-
-  Report(
-      "ERROR: Failed to protect shadow gap [%p, %p]. "
-      "HWASan cannot proceed correctly. ABORTING.\n", (void *)addr,
-      (void *)(addr + size));
-  DumpProcessMap();
-  Die();
+  __sanitizer::ProtectGap(addr, size, kZeroBaseShadowStart,
+                          kZeroBaseMaxShadowStart);
 }
 
-static uptr kLowMemStart;
-static uptr kLowMemEnd;
-static uptr kLowShadowEnd;
-static uptr kLowShadowStart;
-static uptr kHighShadowStart;
-static uptr kHighShadowEnd;
-static uptr kHighMemStart;
-static uptr kHighMemEnd;
+uptr kLowMemStart;
+uptr kLowMemEnd;
+uptr kLowShadowEnd;
+uptr kLowShadowStart;
+uptr kHighShadowStart;
+uptr kHighShadowEnd;
+uptr kHighMemStart;
+uptr kHighMemEnd;
+
+uptr kAliasRegionStart;  // Always 0 on non-x86.
 
 static void PrintRange(uptr start, uptr end, const char *name) {
   Printf("|| [%p, %p] || %.*s ||\n", (void *)start, (void *)end, 10, name);
@@ -151,9 +121,11 @@ void InitPrctl() {
 #define PR_GET_TAGGED_ADDR_CTRL 56
 #define PR_TAGGED_ADDR_ENABLE (1UL << 0)
   // Check we're running on a kernel that can use the tagged address ABI.
-  if (internal_prctl(PR_GET_TAGGED_ADDR_CTRL, 0, 0, 0, 0) == (uptr)-1 &&
-      errno == EINVAL) {
-#if SANITIZER_ANDROID
+  int local_errno = 0;
+  if (internal_iserror(internal_prctl(PR_GET_TAGGED_ADDR_CTRL, 0, 0, 0, 0),
+                       &local_errno) &&
+      local_errno == EINVAL) {
+#if SANITIZER_ANDROID || defined(__x86_64__)
     // Some older Android kernels have the tagged pointer ABI on
     // unconditionally, and hence don't have the tagged-addr prctl while still
     // allow the ABI.
@@ -161,17 +133,20 @@ void InitPrctl() {
     // case.
     return;
 #else
-    Printf(
-        "FATAL: "
-        "HWAddressSanitizer requires a kernel with tagged address ABI.\n");
-    Die();
+    if (flags()->fail_without_syscall_abi) {
+      Printf(
+          "FATAL: "
+          "HWAddressSanitizer requires a kernel with tagged address ABI.\n");
+      Die();
+    }
 #endif
   }
 
   // Turn on the tagged address ABI.
-  if (internal_prctl(PR_SET_TAGGED_ADDR_CTRL, PR_TAGGED_ADDR_ENABLE, 0, 0, 0) ==
-          (uptr)-1 ||
-      !internal_prctl(PR_GET_TAGGED_ADDR_CTRL, 0, 0, 0, 0)) {
+  if ((internal_iserror(internal_prctl(PR_SET_TAGGED_ADDR_CTRL,
+                                       PR_TAGGED_ADDR_ENABLE, 0, 0, 0)) ||
+       !internal_prctl(PR_GET_TAGGED_ADDR_CTRL, 0, 0, 0, 0)) &&
+      flags()->fail_without_syscall_abi) {
     Printf(
         "FATAL: HWAddressSanitizer failed to enable tagged address syscall "
         "ABI.\nSuggest check `sysctl abi.tagged_addr_disabled` "
@@ -205,6 +180,18 @@ bool InitShadow() {
 
   // High memory starts where allocated shadow allows.
   kHighMemStart = ShadowToMem(kHighShadowStart);
+
+#if defined(__x86_64__)
+  constexpr uptr kAliasRegionOffset = 1ULL << (kTaggableRegionCheckShift - 1);
+  kAliasRegionStart =
+      __hwasan_shadow_memory_dynamic_address + kAliasRegionOffset;
+
+  CHECK_EQ(kAliasRegionStart >> kTaggableRegionCheckShift,
+           __hwasan_shadow_memory_dynamic_address >> kTaggableRegionCheckShift);
+  CHECK_EQ(
+      (kAliasRegionStart + kAliasRegionOffset - 1) >> kTaggableRegionCheckShift,
+      __hwasan_shadow_memory_dynamic_address >> kTaggableRegionCheckShift);
+#endif
 
   // Check the sanity of the defined memory ranges (there might be gaps).
   CHECK_EQ(kHighMemStart % GetMmapGranularity(), 0);
@@ -242,26 +229,16 @@ void InitThreads() {
   uptr thread_space_end =
       __hwasan_shadow_memory_dynamic_address - guard_page_size;
   ReserveShadowMemoryRange(thread_space_start, thread_space_end - 1,
-                           "hwasan threads");
+                           "hwasan threads", /*madvise_shadow*/ false);
   ProtectGap(thread_space_end,
              __hwasan_shadow_memory_dynamic_address - thread_space_end);
   InitThreadList(thread_space_start, thread_space_end - thread_space_start);
 }
 
-static void MadviseShadowRegion(uptr beg, uptr end) {
-  uptr size = end - beg + 1;
-  SetShadowRegionHugePageMode(beg, size);
-  if (common_flags()->use_madv_dontdump)
-    DontDumpShadowMemory(beg, size);
-}
-
-void MadviseShadow() {
-  MadviseShadowRegion(kLowShadowStart, kLowShadowEnd);
-  MadviseShadowRegion(kHighShadowStart, kHighShadowEnd);
-}
-
 bool MemIsApp(uptr p) {
+#if !defined(__x86_64__)  // Memory outside the alias range has non-zero tags.
   CHECK(GetTagFromPointer(p) == 0);
+#endif
   return p >= kHighMemStart || (p >= kLowMemStart && p <= kLowMemEnd);
 }
 
@@ -354,8 +331,11 @@ void AndroidTestTlsSlot() {}
 #endif
 
 Thread *GetCurrentThread() {
-  auto *R = (StackAllocationsRingBuffer *)GetCurrentThreadLongPtr();
-  return hwasanThreadList().GetThreadByBufferAddress((uptr)(R->Next()));
+  uptr *ThreadLongPtr = GetCurrentThreadLongPtr();
+  if (UNLIKELY(*ThreadLongPtr == 0))
+    return nullptr;
+  auto *R = (StackAllocationsRingBuffer *)ThreadLongPtr;
+  return hwasanThreadList().GetThreadByBufferAddress((uptr)R->Next());
 }
 
 struct AccessInfo {

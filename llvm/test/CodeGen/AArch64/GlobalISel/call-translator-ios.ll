@@ -5,13 +5,18 @@
 ; CHECK: fixedStack:
 ; CHECK-DAG:  - { id: [[STACK0:[0-9]+]], type: default, offset: 0, size: 1,
 ; CHECK-DAG:  - { id: [[STACK8:[0-9]+]], type: default, offset: 1, size: 1,
-; CHECK: [[LHS_ADDR:%[0-9]+]]:_(p0) = G_FRAME_INDEX %fixed-stack.[[STACK0]]
-; CHECK: [[LHS:%[0-9]+]]:_(s8) = G_LOAD [[LHS_ADDR]](p0) :: (invariant load 1 from %fixed-stack.[[STACK0]], align 16)
-; CHECK: [[RHS_ADDR:%[0-9]+]]:_(p0) = G_FRAME_INDEX %fixed-stack.[[STACK8]]
-; CHECK: [[RHS:%[0-9]+]]:_(s8) = G_LOAD [[RHS_ADDR]](p0) :: (invariant load 1 from %fixed-stack.[[STACK8]])
-; CHECK: [[SUM:%[0-9]+]]:_(s8) = G_ADD [[LHS]], [[RHS]]
-; CHECK: [[SUM32:%[0-9]+]]:_(s32) = G_SEXT [[SUM]](s8)
-; CHECK: $w0 = COPY [[SUM32]](s32)
+; CHECK:   [[FRAME_INDEX:%[0-9]+]]:_(p0) = G_FRAME_INDEX %fixed-stack.1
+; CHECK:   [[LOAD:%[0-9]+]]:_(s32) = G_LOAD [[FRAME_INDEX]](p0) :: (invariant load 1 from %fixed-stack.1, align 16)
+; CHECK:   [[ASSERT_SEXT:%[0-9]+]]:_(s32) = G_ASSERT_SEXT [[LOAD]], 8
+; CHECK:   [[TRUNC:%[0-9]+]]:_(s8) = G_TRUNC [[ASSERT_SEXT]](s32)
+; CHECK:   [[FRAME_INDEX1:%[0-9]+]]:_(p0) = G_FRAME_INDEX %fixed-stack.0
+; CHECK:   [[LOAD1:%[0-9]+]]:_(s32) = G_LOAD [[FRAME_INDEX1]](p0) :: (invariant load 1 from %fixed-stack.0)
+; CHECK:   [[ASSERT_SEXT1:%[0-9]+]]:_(s32) = G_ASSERT_SEXT [[LOAD1]], 8
+; CHECK:   [[TRUNC1:%[0-9]+]]:_(s8) = G_TRUNC [[ASSERT_SEXT1]](s32)
+; CHECK:   [[ADD:%[0-9]+]]:_(s8) = G_ADD [[TRUNC]], [[TRUNC1]]
+; CHECK:   [[SEXT:%[0-9]+]]:_(s32) = G_SEXT [[ADD]](s8)
+; CHECK:   $w0 = COPY [[SEXT]](s32)
+; CHECK:   RET_ReallyLR implicit $w0
 define signext i8 @test_stack_slots([8 x i64], i8 signext %lhs, i8 signext %rhs) {
   %sum = add i8 %lhs, %rhs
   ret i8 %sum
@@ -24,7 +29,6 @@ define signext i8 @test_stack_slots([8 x i64], i8 signext %lhs, i8 signext %rhs)
 ; CHECK: [[C42_OFFS:%[0-9]+]]:_(s64) = G_CONSTANT i64 0
 ; CHECK: [[C42_LOC:%[0-9]+]]:_(p0) = G_PTR_ADD [[SP]], [[C42_OFFS]](s64)
 ; CHECK: G_STORE [[C42]](s8), [[C42_LOC]](p0) :: (store 1 into stack)
-; CHECK: [[SP:%[0-9]+]]:_(p0) = COPY $sp
 ; CHECK: [[C12_OFFS:%[0-9]+]]:_(s64) = G_CONSTANT i64 1
 ; CHECK: [[C12_LOC:%[0-9]+]]:_(p0) = G_PTR_ADD [[SP]], [[C12_OFFS]](s64)
 ; CHECK: G_STORE [[C12]](s8), [[C12_LOC]](p0) :: (store 1 into stack + 1)
@@ -65,7 +69,6 @@ define void @take_128bit_struct([2 x i64]* %ptr, [2 x i64] %in) {
 ; CHECK: [[ADDR:%[0-9]+]]:_(p0) = G_PTR_ADD [[SP]], [[OFF]](s64)
 ; CHECK: G_STORE [[LD1]](s64), [[ADDR]](p0) :: (store 8 into stack, align 1)
 
-; CHECK: [[SP:%[0-9]+]]:_(p0) = COPY $sp
 ; CHECK: [[ADDR:%[0-9]+]]:_(p0) = G_PTR_ADD [[SP]], [[CST]]
 ; CHECK: G_STORE [[LD2]](s64), [[ADDR]](p0) :: (store 8 into stack + 8, align 1)
 define void @test_split_struct([2 x i64]* %ptr) {

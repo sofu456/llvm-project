@@ -1,4 +1,6 @@
-; RUN: llc -verify-machineinstrs -mtriple=powerpc64le-unknown-linux-gnu < %s | FileCheck %s
+; RUN: llc -verify-machineinstrs -mtriple=powerpc64le-unknown-linux-gnu < %s | FileCheck -check-prefixes=CHECK,CHECKLX %s
+; RUN: llc -verify-machineinstrs -mtriple=powerpc64-ibm-aix-xcoff < %s | FileCheck -check-prefixes=CHECK,CHECKAIX %s
+; RUN: llc -verify-machineinstrs -mtriple=powerpc-ibm-aix-xcoff < %s | FileCheck -check-prefixes=CHECK,CHECKAIX32 %s
 
 ; The instructions ADDIStocHA8/LDtocL are used to calculate the address of
 ; globals. The ones that are in bb.3.if.end could not be hoisted by Machine
@@ -36,7 +38,7 @@
 ;    %x3 = COPY %21
 ;    %x12 = COPY %4
 ;    MTCTR8 %4, implicit-def %ctr8
-;    BCTRL8_LDinto_toc 24, %x1, csr_svr464_altivec, implicit-def dead %lr8, implicit-def dead %x2, implicit %ctr8, implicit %rm, implicit %x3, implicit %x12, implicit %x2, implicit-def %r1, implicit-def %x3
+;    BCTRL8_LDinto_toc 24, %x1, csr_ppc64_altivec, implicit-def dead %lr8, implicit-def dead %x2, implicit %ctr8, implicit %rm, implicit %x3, implicit %x12, implicit %x2, implicit-def %r1, implicit-def %x3
 ;    ADJCALLSTACKUP 32, 0, implicit-def dead %r1, implicit %r1
 ;    %22 = COPY %x3
 ;    %x3 = COPY %22
@@ -65,22 +67,32 @@ define signext i32 @test(i32 (i32)* nocapture %FP) local_unnamed_addr #0 {
 ; CHECK-LABEL: test:
 ; CHECK:       # %bb.0: # %entry
 ; CHECK-NEXT:    mflr 0
-; CHECK:         addis 4, 2, .LC0@toc@ha
-; CHECK-NEXT:    addis 5, 2, .LC1@toc@ha
-; CHECK-NEXT:    mr 12, 3
-; CHECK-NEXT:    ld 4, .LC0@toc@l(4)
-; CHECK-NEXT:    ld 5, .LC1@toc@l(5)
-; CHECK-NEXT:    lwz 6, 0(4)
-; CHECK-NEXT:    lwz 7, 0(5)
-; CHECK-NEXT:    cmpw 6, 7
-; CHECK-NEXT:    lwz 6, 0(4)
-; CHECK-NEXT:    bgt 0, .LBB0_2
-; CHECK-NOT:    addis {{[0-9]+}}, 2, .LC0@toc@ha
-; CHECK-NOT:    addis {{[0-9]+}}, 2, .LC1@toc@ha
-; CHECK-NEXT:    .p2align 5
-; CHECK-NEXT:  .LBB0_1: # %if.end
-; CHECK-NOT:    addis {{[0-9]+}}, 2, .LC0@toc@ha
-; CHECK-NOT:    addis {{[0-9]+}}, 2, .LC1@toc@ha
+; CHECKLX:        addis 4, 2, .LC0@toc@ha
+; CHECKLX-NEXT:   addis 5, 2, .LC1@toc@ha
+; CHECKLX-NEXT:   mr 12, 3
+; CHECKLX-NEXT:   ld 4, .LC0@toc@l(4)
+; CHECKLX-NEXT:   ld 5, .LC1@toc@l(5)
+; CHECKLX-NEXT:   lwz 6, 0(4)
+; CHECKLX-NEXT:   lwz 7, 0(5)
+; CHECKLX-NEXT:   cmpw 6, 7
+; CHECKLX-NEXT:   lwz 6, 0(4)
+; CHECKLX-NEXT:   bgt 0, .LBB0_2
+; CHECKLX-NOT:    addis {{[0-9]+}}, 2, .LC0@toc@ha
+; CHECKLX-NOT:    addis {{[0-9]+}}, 2, .LC1@toc@ha
+; CHECKLX-NEXT:   .p2align 5
+; CHECKLX-NEXT: .LBB0_1: # %if.end
+; CHECKLX-NOT:    addis {{[0-9]+}}, 2, .LC0@toc@ha
+; CHECKLX-NOT:    addis {{[0-9]+}}, 2, .LC1@toc@ha
+; CHECKAIX:        ld 5, L..C0(2)
+; CHECKAIX-NEXT:   ld 6, L..C1(2)
+; CHECKAIX-NEXT: L..BB0_1: # %if.end
+; CHECKAIX-NOT:    ld {{[0-9]+}}, L..C0(2)
+; CHECKAIX-NOT:    ld {{[0-9]+}}, L..C1(2)
+; CHECKAIX32:        lwz 5, L..C0(2)
+; CHECKAIX32-NEXT:   lwz 6, L..C1(2)
+; CHECKAIX32-NEXT: L..BB0_1: # %if.end
+; CHECKAIX32-NOT:    lwz 5, L..C0(2)
+; CHECKAIX32-NOT:    lwz 6, L..C1(2)
 ; CHECK:    blr
 entry:
   %0 = load volatile i32, i32* @ga, align 4

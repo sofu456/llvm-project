@@ -13,22 +13,22 @@
 
 #include "llvm/ADT/Twine.h"
 #include "llvm/Remarks/RemarkFormat.h"
+#include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/WithColor.h"
 
 #include "llvm/DWARFLinker/DWARFLinker.h"
+#include "llvm/DWARFLinker/DWARFStreamer.h"
 #include <string>
 
 namespace llvm {
 namespace dsymutil {
 
-enum class OutputFileType {
-  Object,
-  Assembly,
-};
-
 struct LinkOptions {
   /// Verbosity
   bool Verbose = false;
+
+  /// Statistics
+  bool Statistics = false;
 
   /// Skip emitting output
   bool NoOutput = false;
@@ -38,9 +38,6 @@ struct LinkOptions {
 
   /// Update
   bool Update = false;
-
-  /// Minimize
-  bool Minimize = false;
 
   /// Do not check swiftmodule timestamp
   bool NoTimestamp = false;
@@ -65,6 +62,10 @@ struct LinkOptions {
 
   /// Symbol map translator.
   SymbolMapTranslator Translator;
+
+  /// Virtual File System.
+  llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> VFS =
+      vfs::getRealFileSystem();
 
   /// Fields used for linking and placing remarks into the .dSYM bundle.
   /// @{

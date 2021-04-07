@@ -10,7 +10,6 @@
 //
 //===----------------------------------------------------------------------===//
 #include "clang/Sema/MultiplexExternalSemaSource.h"
-#include "clang/AST/DeclContextInternals.h"
 #include "clang/Sema/Lookup.h"
 
 using namespace clang;
@@ -170,13 +169,6 @@ Module *MultiplexExternalSemaSource::getModule(unsigned ID) {
     if (auto M = Sources[i]->getModule(ID))
       return M;
   return nullptr;
-}
-
-bool MultiplexExternalSemaSource::DeclIsFromPCHWithObjectFile(const Decl *D) {
-  for (auto *S : Sources)
-    if (S->DeclIsFromPCHWithObjectFile(D))
-      return true;
-  return false;
 }
 
 bool MultiplexExternalSemaSource::layoutRecordType(const RecordDecl *Record,

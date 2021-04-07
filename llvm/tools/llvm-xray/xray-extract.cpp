@@ -63,9 +63,9 @@ void exportAsYAML(const InstrumentationMap &Map, raw_ostream &OS,
     auto FuncId = Map.getFunctionId(Sled.Function);
     if (!FuncId)
       return;
-    YAMLSleds.push_back({*FuncId, Sled.Address, Sled.Function, Sled.Kind,
-                         Sled.AlwaysInstrument,
-                         ExtractSymbolize ? FH.SymbolOrNumber(*FuncId) : ""});
+    YAMLSleds.push_back(
+        {*FuncId, Sled.Address, Sled.Function, Sled.Kind, Sled.AlwaysInstrument,
+         ExtractSymbolize ? FH.SymbolOrNumber(*FuncId) : "", Sled.Version});
   }
   Output Out(OS, nullptr, 0);
   Out << YAMLSleds;
@@ -83,7 +83,7 @@ static CommandRegistration Unused(&Extract, []() -> Error {
                       InstrumentationMapOrError.takeError());
 
   std::error_code EC;
-  raw_fd_ostream OS(ExtractOutput, EC, sys::fs::OpenFlags::OF_Text);
+  raw_fd_ostream OS(ExtractOutput, EC, sys::fs::OpenFlags::OF_TextWithCRLF);
   if (EC)
     return make_error<StringError>(
         Twine("Cannot open file '") + ExtractOutput + "' for writing.", EC);

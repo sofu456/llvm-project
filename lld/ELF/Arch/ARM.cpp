@@ -18,9 +18,8 @@
 using namespace llvm;
 using namespace llvm::support::endian;
 using namespace llvm::ELF;
-
-namespace lld {
-namespace elf {
+using namespace lld;
+using namespace lld::elf;
 
 namespace {
 class ARM final : public TargetInfo {
@@ -65,6 +64,7 @@ ARM::ARM() {
   ipltEntrySize = 16;
   trapInstr = {0xd4, 0xd4, 0xd4, 0xd4};
   needsThunks = true;
+  defaultMaxPageSize = 65536;
 }
 
 uint32_t ARM::calcEFlags() const {
@@ -121,6 +121,8 @@ RelExpr ARM::getRelExpr(RelType type, const Symbol &s,
     return R_TLSGD_PC;
   case R_ARM_TLS_LDM32:
     return R_TLSLD_PC;
+  case R_ARM_TLS_LDO32:
+    return R_DTPREL;
   case R_ARM_BASE_PREL:
     // B(S) + A - P
     // FIXME: currently B(S) assumed to be .got, this may not hold for all
@@ -132,6 +134,8 @@ RelExpr ARM::getRelExpr(RelType type, const Symbol &s,
   case R_ARM_THM_MOVW_PREL_NC:
   case R_ARM_THM_MOVT_PREL:
     return R_PC;
+  case R_ARM_ALU_PC_G0:
+  case R_ARM_LDR_PC_G0:
   case R_ARM_THM_ALU_PREL_11_0:
   case R_ARM_THM_PC8:
   case R_ARM_THM_PC12:
@@ -146,7 +150,7 @@ RelExpr ARM::getRelExpr(RelType type, const Symbol &s,
   case R_ARM_NONE:
     return R_NONE;
   case R_ARM_TLS_LE32:
-    return R_TLS;
+    return R_TPREL;
   case R_ARM_V4BX:
     // V4BX is just a marker to indicate there's a "bx rN" instruction at the
     // given address. It can be used to implement a special linker mode which
@@ -275,7 +279,7 @@ void ARM::addPltSymbols(InputSection &isec, uint64_t off) const {
 
 bool ARM::needsThunk(RelExpr expr, RelType type, const InputFile *file,
                      uint64_t branchAddr, const Symbol &s,
-                     int64_t /*a*/) const {
+                     int64_t a) const {
   // If S is an undefined weak symbol and does not have a PLT entry then it
   // will be resolved as a branch to the next instruction.
   if (s.isUndefWeak() && !s.isInPlt())
@@ -294,7 +298,7 @@ bool ARM::needsThunk(RelExpr expr, RelType type, const InputFile *file,
     LLVM_FALLTHROUGH;
   case R_ARM_CALL: {
     uint64_t dst = (expr == R_PLT_PC) ? s.getPltVA() : s.getVA();
-    return !inBranchRange(type, branchAddr, dst);
+    return !inBranchRange(type, branchAddr, dst + a);
   }
   case R_ARM_THM_JUMP19:
   case R_ARM_THM_JUMP24:
@@ -305,7 +309,7 @@ bool ARM::needsThunk(RelExpr expr, RelType type, const InputFile *file,
     LLVM_FALLTHROUGH;
   case R_ARM_THM_CALL: {
     uint64_t dst = (expr == R_PLT_PC) ? s.getPltVA() : s.getVA();
-    return !inBranchRange(type, branchAddr, dst);
+    return !inBranchRange(type, branchAddr, dst + a);
   }
   }
   return false;
@@ -346,46 +350,31 @@ uint32_t ARM::getThunkSectionSpacing() const {
 }
 
 bool ARM::inBranchRange(RelType type, uint64_t src, uint64_t dst) const {
-  uint64_t range;
-  uint64_t instrSize;
-
-  switch (type) {
-  case R_ARM_PC24:
-  case R_ARM_PLT32:
-  case R_ARM_JUMP24:
-  case R_ARM_CALL:
-    range = 0x2000000;
-    instrSize = 4;
-    break;
-  case R_ARM_THM_JUMP19:
-    range = 0x100000;
-    instrSize = 2;
-    break;
-  case R_ARM_THM_JUMP24:
-  case R_ARM_THM_CALL:
-    range = config->armJ1J2BranchEncoding ? 0x1000000 : 0x400000;
-    instrSize = 2;
-    break;
-  default:
-    return true;
-  }
-  // PC at Src is 2 instructions ahead, immediate of branch is signed
-  if (src > dst)
-    range -= 2 * instrSize;
-  else
-    range += instrSize;
-
   if ((dst & 0x1) == 0)
     // Destination is ARM, if ARM caller then Src is already 4-byte aligned.
     // If Thumb Caller (BLX) the Src address has bottom 2 bits cleared to ensure
     // destination will be 4 byte aligned.
     src &= ~0x3;
   else
-    // Bit 0 == 1 denotes Thumb state, it is not part of the range
+    // Bit 0 == 1 denotes Thumb state, it is not part of the range.
     dst &= ~0x1;
 
-  uint64_t distance = (src > dst) ? src - dst : dst - src;
-  return distance <= range;
+  int64_t offset = dst - src;
+  switch (type) {
+  case R_ARM_PC24:
+  case R_ARM_PLT32:
+  case R_ARM_JUMP24:
+  case R_ARM_CALL:
+    return llvm::isInt<26>(offset);
+  case R_ARM_THM_JUMP19:
+    return llvm::isInt<21>(offset);
+  case R_ARM_THM_JUMP24:
+  case R_ARM_THM_CALL:
+    return config->armJ1J2BranchEncoding ? llvm::isInt<25>(offset)
+                                         : llvm::isInt<23>(offset);
+  default:
+    return true;
+  }
 }
 
 // Helper to produce message text when LLD detects that a CALL relocation to
@@ -408,6 +397,58 @@ static void stateChangeWarning(uint8_t *loc, RelType relt, const Symbol &s) {
          ", %function' to give symbol type STT_FUNC if"
          " interworking between ARM and Thumb is required");
   }
+}
+
+// Utility functions taken from ARMAddressingModes.h, only changes are LLD
+// coding style.
+
+// Rotate a 32-bit unsigned value right by a specified amt of bits.
+static uint32_t rotr32(uint32_t val, uint32_t amt) {
+  assert(amt < 32 && "Invalid rotate amount");
+  return (val >> amt) | (val << ((32 - amt) & 31));
+}
+
+// Rotate a 32-bit unsigned value left by a specified amt of bits.
+static uint32_t rotl32(uint32_t val, uint32_t amt) {
+  assert(amt < 32 && "Invalid rotate amount");
+  return (val << amt) | (val >> ((32 - amt) & 31));
+}
+
+// Try to encode a 32-bit unsigned immediate imm with an immediate shifter
+// operand, this form is an 8-bit immediate rotated right by an even number of
+// bits. We compute the rotate amount to use.  If this immediate value cannot be
+// handled with a single shifter-op, determine a good rotate amount that will
+// take a maximal chunk of bits out of the immediate.
+static uint32_t getSOImmValRotate(uint32_t imm) {
+  // 8-bit (or less) immediates are trivially shifter_operands with a rotate
+  // of zero.
+  if ((imm & ~255U) == 0)
+    return 0;
+
+  // Use CTZ to compute the rotate amount.
+  unsigned tz = llvm::countTrailingZeros(imm);
+
+  // Rotate amount must be even.  Something like 0x200 must be rotated 8 bits,
+  // not 9.
+  unsigned rotAmt = tz & ~1;
+
+  // If we can handle this spread, return it.
+  if ((rotr32(imm, rotAmt) & ~255U) == 0)
+    return (32 - rotAmt) & 31; // HW rotates right, not left.
+
+  // For values like 0xF000000F, we should ignore the low 6 bits, then
+  // retry the hunt.
+  if (imm & 63U) {
+    unsigned tz2 = countTrailingZeros(imm & ~63U);
+    unsigned rotAmt2 = tz2 & ~1;
+    if ((rotr32(imm, rotAmt2) & ~255U) == 0)
+      return (32 - rotAmt2) & 31; // HW rotates right, not left.
+  }
+
+  // Otherwise, we have no way to cover this span of bits with a single
+  // shifter_op immediate.  Return a chunk of bits that will be useful to
+  // handle.
+  return (32 - rotAmt) & 31; // HW rotates right, not left.
 }
 
 void ARM::relocate(uint8_t *loc, const Relocation &rel, uint64_t val) const {
@@ -574,6 +615,45 @@ void ARM::relocate(uint8_t *loc, const Relocation &rel, uint64_t val) const {
                   ((val << 4) & 0x7000) |    // imm3
                   (val & 0x00ff));           // imm8
     break;
+  case R_ARM_ALU_PC_G0: {
+    // ADR (literal) add = bit23, sub = bit22
+    // literal is a 12-bit modified immediate, made up of a 4-bit even rotate
+    // right and an 8-bit immediate. The code-sequence here is derived from
+    // ARMAddressingModes.h in llvm/Target/ARM/MCTargetDesc. In our case we
+    // want to give an error if we cannot encode the constant.
+    uint32_t opcode = 0x00800000;
+    if (val >> 63) {
+      opcode = 0x00400000;
+      val = ~val + 1;
+    }
+    if ((val & ~255U) != 0) {
+      uint32_t rotAmt = getSOImmValRotate(val);
+      // Error if we cannot encode this with a single shift
+      if (rotr32(~255U, rotAmt) & val)
+        error(getErrorLocation(loc) + "unencodeable immediate " +
+              Twine(val).str() + " for relocation " + toString(rel.type));
+      val = rotl32(val, rotAmt) | ((rotAmt >> 1) << 8);
+    }
+    write32le(loc, (read32le(loc) & 0xff0ff000) | opcode | val);
+    break;
+  }
+  case R_ARM_LDR_PC_G0: {
+    // R_ARM_LDR_PC_G0 is S + A - P, we have ((S + A) | T) - P, if S is a
+    // function then addr is 0 (modulo 2) and Pa is 0 (modulo 4) so we can clear
+    // bottom bit to recover S + A - P.
+    if (rel.sym->isFunc())
+      val &= ~0x1;
+    // LDR (literal) u = bit23
+    int64_t imm = val;
+    uint32_t u = 0x00800000;
+    if (imm < 0) {
+      imm = -imm;
+      u = 0;
+    }
+    checkUInt(loc, imm, 12, rel);
+    write32le(loc, (read32le(loc) & 0xff7ff000) | u | imm);
+    break;
+  }
   case R_ARM_THM_ALU_PREL_11_0: {
     // ADR encoding T2 (sub), T3 (add) i:imm3:imm8
     int64_t imm = val;
@@ -708,6 +788,22 @@ int64_t ARM::getImplicitAddend(const uint8_t *buf, RelType type) const {
                             ((lo & 0x7000) >> 4) |  // imm3
                             (lo & 0x00ff));         // imm8
   }
+  case R_ARM_ALU_PC_G0: {
+    // 12-bit immediate is a modified immediate made up of a 4-bit even
+    // right rotation and 8-bit constant. After the rotation the value
+    // is zero-extended. When bit 23 is set the instruction is an add, when
+    // bit 22 is set it is a sub.
+    uint32_t instr = read32le(buf);
+    uint32_t val = rotr32(instr & 0xff, ((instr & 0xf00) >> 8) * 2);
+    return (instr & 0x00400000) ? -val : val;
+  }
+  case R_ARM_LDR_PC_G0: {
+    // ADR (literal) add = bit23, sub = bit22
+    // LDR (literal) u = bit23 unsigned imm12
+    bool u = read32le(buf) & 0x00800000;
+    uint32_t imm12 = read32le(buf) & 0xfff;
+    return u ? imm12 : -imm12;
+  }
   case R_ARM_THM_ALU_PREL_11_0: {
     // Thumb2 ADR, which is an alias for a sub or add instruction with an
     // unsigned immediate.
@@ -735,10 +831,7 @@ int64_t ARM::getImplicitAddend(const uint8_t *buf, RelType type) const {
   }
 }
 
-TargetInfo *getARMTargetInfo() {
+TargetInfo *elf::getARMTargetInfo() {
   static ARM target;
   return &target;
 }
-
-} // namespace elf
-} // namespace lld

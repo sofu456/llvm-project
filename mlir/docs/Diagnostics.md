@@ -1,4 +1,4 @@
-# Introduction and Usage Guide to MLIR's Diagnostics Infrastructure
+# Diagnostic Infrastructure
 
 [TOC]
 
@@ -11,69 +11,9 @@ structure of the IR, operations, etc.
 ## Source Locations
 
 Source location information is extremely important for any compiler, because it
-provides a baseline for debuggability and error-reporting. MLIR provides several
-different location types depending on the situational need.
-
-### CallSite Location
-
-```
-callsite-location ::= 'callsite' '(' location 'at' location ')'
-```
-
-An instance of this location allows for representing a directed stack of
-location usages. This connects a location of a `callee` with the location of a
-`caller`.
-
-### FileLineCol Location
-
-```
-filelinecol-location ::= string-literal ':' integer-literal ':' integer-literal
-```
-
-An instance of this location represents a tuple of file, line number, and column
-number. This is similar to the type of location that you get from most source
-languages.
-
-### Fused Location
-
-```
-fused-location ::= `fused` fusion-metadata? '[' location (location ',')* ']'
-fusion-metadata ::= '<' attribute-value '>'
-```
-
-An instance of a `fused` location represents a grouping of several other source
-locations, with optional metadata that describes the context of the fusion.
-There are many places within a compiler in which several constructs may be fused
-together, e.g. pattern rewriting, that normally result partial or even total
-loss of location information. With `fused` locations, this is a non-issue.
-
-### Name Location
-
-```
-name-location ::= string-literal ('(' location ')')?
-```
-
-An instance of this location allows for attaching a name to a child location.
-This can be useful for representing the locations of variable, or node,
-definitions.
-
-### Opaque Location
-
-An instance of this location essentially contains a pointer to some data
-structure that is external to MLIR and an optional location that can be used if
-the first one is not suitable. Since it contains an external structure, only the
-optional location is used during serialization.
-
-### Unknown Location
-
-```
-unknown-location ::= `unknown`
-```
-
-Source location information is an extremely integral part of the MLIR
-infrastructure. As such, location information is always present in the IR, and
-must explicitly be set to unknown. Thus an instance of the `unknown` location,
-represents an unspecified source location.
+provides a baseline for debuggability and error-reporting. The
+[builtin dialect](Dialects/Builtin.md) provides several different location
+attributes types depending on the situational need.
 
 ## Diagnostic Engine
 
@@ -93,8 +33,8 @@ DiagnosticEngine engine = ctx->getDiagEngine();
 // or failure if the diagnostic should be propagated to the previous handlers.
 DiagnosticEngine::HandlerID id = engine.registerHandler(
     [](Diagnostic &diag) -> LogicalResult {
-  bool should_propage_diagnostic = ...;
-  return failure(should_propage_diagnostic);
+  bool should_propagate_diagnostic = ...;
+  return failure(should_propagate_diagnostic);
 });
 
 
@@ -200,7 +140,9 @@ destroyed.
 ## Diagnostic Configuration Options
 
 Several options are provided to help control and enhance the behavior of
-diagnostics. These options are listed below:
+diagnostics. These options can be configured via the MLIRContext, and registered
+to the command line with the `registerMLIRContextCLOptions` method. These
+options are listed below:
 
 ### Print Operation On Diagnostic
 
@@ -388,8 +330,7 @@ ParallelDiagnosticHandler handler(context);
 
 // Process a list of operations in parallel.
 std::vector<Operation *> opsToProcess = ...;
-llvm::for_each_n(llvm::parallel::par, 0, opsToProcess.size(),
-                 [&](size_t i) {
+llvm::parallelForEachN(0, opsToProcess.size(), [&](size_t i) {
   // Notify the handler that we are processing the i'th operation.
   handler.setOrderIDForThread(i);
   auto *op = opsToProcess[i];

@@ -25,7 +25,7 @@ template <typename T> class ArrayRef;
 class CallBase;
 class Constant;
 class ConstantExpr;
-class ConstantVector;
+class DSOLocalEquivalent;
 class DataLayout;
 class Function;
 class GlobalValue;
@@ -35,8 +35,11 @@ class Type;
 
 /// If this constant is a constant offset from a global, return the global and
 /// the constant. Because of constantexprs, this function is recursive.
+/// If the global is part of a dso_local_equivalent constant, return it through
+/// `Equiv` if it is provided.
 bool IsConstantOffsetFromGlobal(Constant *C, GlobalValue *&GV, APInt &Offset,
-                                const DataLayout &DL);
+                                const DataLayout &DL,
+                                DSOLocalEquivalent **DSOEquiv = nullptr);
 
 /// ConstantFoldInstruction - Try to constant fold the specified instruction.
 /// If successful, the constant result is returned, if not, null is returned.
@@ -119,10 +122,11 @@ Constant *ConstantFoldInsertElementInstruction(Constant *Val,
 Constant *ConstantFoldExtractElementInstruction(Constant *Val, Constant *Idx);
 
 /// Attempt to constant fold a shufflevector instruction with the
-/// specified operands and indices.  The constant result is returned if
-/// successful; if not, null is returned.
+/// specified operands and mask.  See class ShuffleVectorInst for a description
+/// of the mask representation. The constant result is returned if successful;
+/// if not, null is returned.
 Constant *ConstantFoldShuffleVectorInstruction(Constant *V1, Constant *V2,
-                                               Constant *Mask);
+                                               ArrayRef<int> Mask);
 
 /// ConstantFoldLoadFromConstPtr - Return the value that a load from C would
 /// produce if it is constant and determinable.  If this is not determinable,

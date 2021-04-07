@@ -1,5 +1,15 @@
 // RUN: %libomp-compile-and-run
 
+// Parsing error until gcc8:
+// UNSUPPORTED: gcc-4, gcc-5, gcc-6, gcc-7, gcc-8
+
+// Parsing error until clang11:
+// UNSUPPORTED: clang-10, clang-9, clang-8, clang-7
+
+// Missing GOMP_taskgroup_reduction_(un)register in LLVM/OpenMP
+// Should be removed once the functions are implemented
+// XFAIL: gcc-9, gcc-10
+
 #include <stdio.h>
 #include <omp.h>
 
@@ -36,18 +46,23 @@ printf("th %d passed bar0\n", th_gen);
   for (i = 1; i < 4; ++i) {
     bar(i);
 printf("th %d (gen by th %d) passed bar%d in taskloop\n", omp_get_thread_num(), th_gen, i);
-//  #pragma omp task in_reduction(+:r)
+  #pragma omp task in_reduction(+:r)
     r += i;
   }
   return 0;
 }
-// res = 2*((1+2)+(2+3)+(3+4)+(4+5)+1+2+3) = 60
-#define res 60
+// res = ((1+2)+(2+3)+(3+4)+(4+5)+1+2+3) = 30
+#define res 30
 int main()
 {
   r = 0;
   #pragma omp parallel num_threads(2)
-    foo();
+  { // barrier ensures threads have started before tasks creation
+    #pragma omp barrier
+    // single ensures no race condition between taskgroup reductions
+    #pragma omp single nowait
+      foo();
+  }
   if (r == res) {
     return 0;
   } else {

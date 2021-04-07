@@ -14,7 +14,6 @@
 #ifndef LLVM_UTILS_TABLEGEN_CODEGENDAGPATTERNS_H
 #define LLVM_UTILS_TABLEGEN_CODEGENDAGPATTERNS_H
 
-#include "CodeGenHwModes.h"
 #include "CodeGenIntrinsics.h"
 #include "CodeGenTarget.h"
 #include "SDNodeProperties.h"
@@ -42,7 +41,6 @@ class SDNodeInfo;
 class TreePattern;
 class TreePatternNode;
 class CodeGenDAGPatterns;
-class ComplexPattern;
 
 /// Shared pointer for TreePatternNode.
 using TreePatternNodePtr = std::shared_ptr<TreePatternNode>;
@@ -190,7 +188,7 @@ private:
 
 struct TypeSetByHwMode : public InfoByHwMode<MachineValueTypeSet> {
   using SetType = MachineValueTypeSet;
-  std::vector<unsigned> AddrSpaces;
+  SmallVector<unsigned, 16> AddrSpaces;
 
   TypeSetByHwMode() = default;
   TypeSetByHwMode(const TypeSetByHwMode &VTS) = default;
@@ -437,8 +435,6 @@ public:
 
   unsigned getScope() const { return Scope; }
   const std::string &getIdentifier() const { return Identifier; }
-
-  std::string getFullName() const;
 
   bool operator==(const ScopedName &o) const;
   bool operator!=(const ScopedName &o) const;
@@ -1107,15 +1103,6 @@ public:
 /// PatternToMatch - Used by CodeGenDAGPatterns to keep tab of patterns
 /// processed to produce isel.
 class PatternToMatch {
-public:
-  PatternToMatch(Record *srcrecord, std::vector<Predicate> preds,
-                 TreePatternNodePtr src, TreePatternNodePtr dst,
-                 std::vector<Record *> dstregs, int complexity,
-                 unsigned uid, unsigned setmode = 0)
-      : SrcRecord(srcrecord), SrcPattern(src), DstPattern(dst),
-        Predicates(std::move(preds)), Dstregs(std::move(dstregs)),
-        AddedComplexity(complexity), ID(uid), ForceMode(setmode) {}
-
   Record          *SrcRecord;   // Originating Record for the pattern.
   TreePatternNodePtr SrcPattern;      // Source pattern to match.
   TreePatternNodePtr DstPattern;      // Resulting pattern.
@@ -1126,6 +1113,15 @@ public:
   unsigned         ID;          // Unique ID for the record.
   unsigned         ForceMode;   // Force this mode in type inference when set.
 
+public:
+  PatternToMatch(Record *srcrecord, std::vector<Predicate> preds,
+                 TreePatternNodePtr src, TreePatternNodePtr dst,
+                 std::vector<Record *> dstregs, int complexity,
+                 unsigned uid, unsigned setmode = 0)
+      : SrcRecord(srcrecord), SrcPattern(src), DstPattern(dst),
+        Predicates(std::move(preds)), Dstregs(std::move(dstregs)),
+        AddedComplexity(complexity), ID(uid), ForceMode(setmode) {}
+
   Record          *getSrcRecord()  const { return SrcRecord; }
   TreePatternNode *getSrcPattern() const { return SrcPattern.get(); }
   TreePatternNodePtr getSrcPatternShared() const { return SrcPattern; }
@@ -1134,6 +1130,8 @@ public:
   const std::vector<Record*> &getDstRegs() const { return Dstregs; }
   int         getAddedComplexity() const { return AddedComplexity; }
   const std::vector<Predicate> &getPredicates() const { return Predicates; }
+  unsigned getID() const { return ID; }
+  unsigned getForceMode() const { return ForceMode; }
 
   std::string getPredicateCheck() const;
 
@@ -1180,7 +1178,7 @@ public:
   const CodeGenTarget &getTargetInfo() const { return Target; }
   const TypeSetByHwMode &getLegalTypes() const { return LegalVTS; }
 
-  Record *getSDNodeNamed(const std::string &Name) const;
+  Record *getSDNodeNamed(StringRef Name) const;
 
   const SDNodeInfo &getSDNodeInfo(Record *R) const {
     auto F = SDNodes.find(R);

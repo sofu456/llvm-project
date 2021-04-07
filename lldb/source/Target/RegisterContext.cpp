@@ -150,6 +150,20 @@ bool RegisterContext::SetPC(uint64_t pc) {
   return success;
 }
 
+bool RegisterContext::GetPCForSymbolication(Address &address) {
+  addr_t pc = GetPC(LLDB_INVALID_ADDRESS);
+  if (pc == LLDB_INVALID_ADDRESS)
+    return false;
+  TargetSP target_sp = m_thread.CalculateTarget();
+  if (!target_sp.get())
+    return false;
+
+  if (!BehavesLikeZerothFrame() && pc != 0)
+    pc--;
+  address.SetLoadAddress(pc, target_sp.get());
+  return true;
+}
+
 bool RegisterContext::SetPC(Address addr) {
   TargetSP target_sp = m_thread.CalculateTarget();
   Target *target = target_sp.get();
@@ -274,6 +288,24 @@ uint32_t RegisterContext::SetHardwareBreakpoint(lldb::addr_t addr,
   return LLDB_INVALID_INDEX32;
 }
 
+// Used when parsing DWARF and EH frame information and any other object file
+// sections that contain register numbers in them.
+uint32_t
+RegisterContext::ConvertRegisterKindToRegisterNumber(lldb::RegisterKind kind,
+                                                     uint32_t num) {
+  const uint32_t num_regs = GetRegisterCount();
+
+  assert(kind < kNumRegisterKinds);
+  for (uint32_t reg_idx = 0; reg_idx < num_regs; ++reg_idx) {
+    const RegisterInfo *reg_info = GetRegisterInfoAtIndex(reg_idx);
+
+    if (reg_info->kinds[kind] == num)
+      return reg_idx;
+  }
+
+  return LLDB_INVALID_REGNUM;
+}
+
 bool RegisterContext::ClearHardwareBreakpoint(uint32_t hw_idx) { return false; }
 
 uint32_t RegisterContext::NumSupportedHardwareWatchpoints() { return 0; }
@@ -395,6 +427,17 @@ Status RegisterContext::WriteRegisterValueToMemory(
     error.SetErrorString("invalid process");
 
   return error;
+}
+
+lldb::ByteOrder RegisterContext::GetByteOrder() {
+  // Get the target process whose privileged thread was used for the register
+  // read.
+  lldb::ByteOrder byte_order = lldb::eByteOrderInvalid;
+  lldb_private::Process *process = CalculateProcess().get();
+
+  if (process)
+    byte_order = process->GetByteOrder();
+  return byte_order;
 }
 
 bool RegisterContext::ReadAllRegisterValues(

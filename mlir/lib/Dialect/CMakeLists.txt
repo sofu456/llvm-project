@@ -1,16 +1,29 @@
 add_subdirectory(Affine)
+add_subdirectory(ArmNeon)
+add_subdirectory(ArmSVE)
+add_subdirectory(Async)
+add_subdirectory(AMX)
 add_subdirectory(AVX512)
-add_subdirectory(FxpMathOps)
+add_subdirectory(Complex)
+add_subdirectory(DLTI)
 add_subdirectory(GPU)
 add_subdirectory(Linalg)
 add_subdirectory(LLVMIR)
-add_subdirectory(LoopOps)
+add_subdirectory(Math)
+add_subdirectory(MemRef)
+add_subdirectory(OpenACC)
 add_subdirectory(OpenMP)
+add_subdirectory(PDL)
+add_subdirectory(PDLInterp)
 add_subdirectory(Quant)
+add_subdirectory(SCF)
 add_subdirectory(SDBM)
 add_subdirectory(Shape)
 add_subdirectory(SPIRV)
 add_subdirectory(StandardOps)
+add_subdirectory(Tensor)
+add_subdirectory(Tosa)
+add_subdirectory(Utils)
 add_subdirectory(Vector)
 
 set(LLVM_OPTIONAL_SOURCES
@@ -22,8 +35,7 @@ add_mlir_library(MLIRDialect
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Dialect
-  )
-target_link_libraries(MLIRDialect
-  PUBLIC
+
+  LINK_LIBS PUBLIC
   MLIRIR
   )

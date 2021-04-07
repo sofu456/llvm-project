@@ -1,12 +1,12 @@
 =========================
-LLVM 11.0.0 Release Notes
+LLVM 13.0.0 Release Notes
 =========================
 
 .. contents::
     :local:
 
 .. warning::
-   These are in-progress notes for the upcoming LLVM 11 release.
+   These are in-progress notes for the upcoming LLVM 13 release.
    Release notes for previous releases can be found on
    `the Download Page <https://releases.llvm.org/download.html>`_.
 
@@ -15,7 +15,7 @@ Introduction
 ============
 
 This document contains the release notes for the LLVM Compiler Infrastructure,
-release 11.0.0.  Here we describe the status of LLVM, including major improvements
+release 13.0.0.  Here we describe the status of LLVM, including major improvements
 from the previous release, improvements in various subprojects of LLVM, and
 some of the current users of the code.  All LLVM releases may be downloaded
 from the `LLVM releases web site <https://llvm.org/releases/>`_.
@@ -40,8 +40,6 @@ Non-comprehensive list of changes in this release
    functionality, or simply have a lot to talk about), see the `NOTE` below
    for adding a new subsection.
 
-* ...
-
 
 .. NOTE
    If you would like to document a larger change, then you can add a
@@ -53,28 +51,27 @@ Non-comprehensive list of changes in this release
 
    Makes programs 10x faster by doing Special New Thing.
 
+* Windows Control-flow Enforcement Technology: the ``-ehcontguard`` option now
+  emits valid unwind entrypoints which are validated when the context is being
+  set during exception handling.
 
 Changes to the LLVM IR
 ----------------------
 
-* The callsite attribute `vector-function-abi-variant
-  <https://llvm.org/docs/LangRef.html#call-site-attributes>`_ has been
-  added to describe the mapping between scalar functions and vector
-  functions, to enable vectorization of call sites. The information
-  provided by the attribute is interfaced via the API provided by the
-  ``VFDatabase`` class.
+* The ``inalloca`` attribute now has a mandatory type field, similar
+  to ``byval`` and ``sret``.
+
 
 Changes to building LLVM
 ------------------------
+
+Changes to TableGen
+-------------------
 
 Changes to the ARM Backend
 --------------------------
 
 During this release ...
-
-* Implemented C-language intrinsics for the full Arm v8.1-M MVE instruction
-  set. ``<arm_mve.h>`` now supports the complete API defined in the Arm C
-  Language Extensions.
 
 Changes to the MIPS Target
 --------------------------
@@ -92,30 +89,23 @@ Changes to the X86 Target
 
 During this release ...
 
-
-* Functions with the probe-stack attribute set to "inline-asm" are now protected
-  against stack clash without the need of a third-party probing function and
-  with limited impact on performance.
-
 Changes to the AMDGPU Target
 -----------------------------
+
+During this release ...
 
 Changes to the AVR Target
 -----------------------------
 
-* Moved from an experimental backend to an official backend. AVR support is now
-  included by default in all LLVM builds and releases and is available under
-  the "avr-unknown-unknown" target triple.
+During this release ...
 
 Changes to the WebAssembly Target
 ---------------------------------
 
 During this release ...
 
-
 Changes to the OCaml bindings
 -----------------------------
-
 
 
 Changes to the C API
@@ -126,17 +116,41 @@ Changes to the Go bindings
 --------------------------
 
 
+Changes to the FastISel infrastructure
+--------------------------------------
+
+* FastISel no longer tracks killed registers, and instead leaves this to the
+  register allocator. This means that ``hasTrivialKill()`` is removed, as well
+  as the ``OpNIsKill`` parameters to the ``fastEmit_*()`` family of functions.
+
 Changes to the DAG infrastructure
 ---------------------------------
 
-Changes to LLDB
-===============
 
-External Open Source Projects Using LLVM 11
+Changes to the Debug Info
+---------------------------------
+
+During this release ...
+
+Changes to the LLVM tools
+---------------------------------
+
+* The options ``--build-id-link-{dir,input,output}`` have been deleted.
+  (`D96310 <https://reviews.llvm.org/D96310>`_)
+
+* Support for in-order processors has been added to ``llvm-mca``.
+  (`D94928 <https://reviews.llvm.org/D94928>`_)
+
+Changes to LLDB
+---------------------------------
+
+Changes to Sanitizers
+---------------------
+
+External Open Source Projects Using LLVM 13
 ===========================================
 
 * A project...
-
 
 Additional Information
 ======================

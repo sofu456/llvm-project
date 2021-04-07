@@ -57,8 +57,30 @@ int main(int argc, char const *argv[]) {
   f.i = 1;
   f.j = 0;
   f.k = 1;
-    } 
+    }
   } clang_example;
+
+  class B {
+  public:
+    uint32_t b_a;
+  };
+
+  class D : public B {
+  public:
+    uint32_t d_a : 1;
+  } derived;
+
+  union union_with_bitfields {
+      unsigned int a : 8;
+      unsigned int b : 16;
+      unsigned int c : 32;
+      unsigned int x;
+  } uwbf;
+
+  union union_with_unnamed_bitfield {
+   unsigned int : 16, a : 24;
+   unsigned int x;
+  } uwubf;
 
   lba.a = 2;
 
@@ -76,6 +98,11 @@ int main(int argc, char const *argv[]) {
   lbd.arr[2] = '\0';
   lbd.a = 5;
 
+  derived.b_a = 2;
+  derived.d_a = 1;
+
+  uwbf.x = 0xFFFFFFFF;
+  uwubf.x = 0xFFFFFFFF;
 
   return 0; // Set break point at this line.
 }

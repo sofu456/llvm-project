@@ -16,6 +16,7 @@
 #include "lldb/Core/Module.h"
 #include "lldb/Core/ModuleSpec.h"
 #include "lldb/Core/PluginManager.h"
+#include "lldb/Core/Progress.h"
 #include "lldb/Core/Section.h"
 #include "lldb/Host/FileSystem.h"
 #include "lldb/Host/LZMA.h"
@@ -37,6 +38,7 @@
 #include "llvm/Object/Decompressor.h"
 #include "llvm/Support/ARMBuildAttributes.h"
 #include "llvm/Support/CRC.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/MipsABIFlags.h"
@@ -296,9 +298,23 @@ static uint32_t mipsVariantFromElfFlags (const elf::ELFHeader &header) {
   return arch_variant;
 }
 
+static uint32_t riscvVariantFromElfFlags(const elf::ELFHeader &header) {
+  uint32_t fileclass = header.e_ident[EI_CLASS];
+  switch (fileclass) {
+  case llvm::ELF::ELFCLASS32:
+    return ArchSpec::eRISCVSubType_riscv32;
+  case llvm::ELF::ELFCLASS64:
+    return ArchSpec::eRISCVSubType_riscv64;
+  default:
+    return ArchSpec::eRISCVSubType_unknown;
+  }
+}
+
 static uint32_t subTypeFromElfHeader(const elf::ELFHeader &header) {
   if (header.e_machine == llvm::ELF::EM_MIPS)
     return mipsVariantFromElfFlags(header);
+  else if (header.e_machine == llvm::ELF::EM_RISCV)
+    return riscvVariantFromElfFlags(header);
 
   return LLDB_INVALID_CPUTYPE;
 }
@@ -541,7 +557,8 @@ size_t ObjectFileELF::GetModuleSpecifications(
                       __FUNCTION__, file.GetPath().c_str());
           }
 
-          data_sp = MapFileData(file, -1, file_offset);
+          if (data_sp->GetByteSize() < length)
+            data_sp = MapFileData(file, -1, file_offset);
           if (data_sp)
             data.SetData(data_sp);
           // In case there is header extension in the section #0, the header we
@@ -575,13 +592,10 @@ size_t ObjectFileELF::GetModuleSpecifications(
             uint32_t core_notes_crc = 0;
 
             if (!gnu_debuglink_crc) {
-              static Timer::Category func_cat(LLVM_PRETTY_FUNCTION);
-              lldb_private::Timer scoped_timer(
-                  func_cat,
+              LLDB_SCOPED_TIMERF(
                   "Calculating module crc32 %s with size %" PRIu64 " KiB",
                   file.GetLastPathComponent().AsCString(),
-                  (FileSystem::Instance().GetByteSize(file) - file_offset) /
-                      1024);
+                  (length - file_offset) / 1024);
 
               // For core files - which usually don't happen to have a
               // gnu_debuglink, and are pretty bulky - calculating whole
@@ -903,7 +917,7 @@ size_t ObjectFileELF::ParseDependentModules() {
   if (m_filespec_up)
     return m_filespec_up->GetSize();
 
-  m_filespec_up.reset(new FileSpecList());
+  m_filespec_up = std::make_unique<FileSpecList>();
 
   if (!ParseSectionHeaders())
     return 0;
@@ -1239,7 +1253,7 @@ void ObjectFileELF::ParseARMAttributes(DataExtractor &data, uint64_t length,
   lldb::offset_t Offset = 0;
 
   uint8_t FormatVersion = data.GetU8(&Offset);
-  if (FormatVersion != llvm::ARMBuildAttrs::Format_Version)
+  if (FormatVersion != llvm::ELFAttrs::Format_Version)
     return;
 
   Offset = Offset + sizeof(uint32_t); // Section Length
@@ -1849,7 +1863,7 @@ void ObjectFileELF::CreateSections(SectionList &unified_section_list) {
   // unified section list.
   if (GetType() != eTypeDebugInfo)
     unified_section_list = *m_sections_up;
-  
+
   // If there's a .gnu_debugdata section, we'll try to read the .symtab that's
   // embedded in there and replace the one in the original object file (if any).
   // If there's none in the orignal object file, we add it to it.
@@ -1911,7 +1925,7 @@ std::shared_ptr<ObjectFileELF> ObjectFileELF::GetGnuDebugDataObjectFile() {
   ArchSpec spec = m_gnu_debug_data_object_file->GetArchitecture();
   if (spec && m_gnu_debug_data_object_file->SetModulesArchitecture(spec))
     return m_gnu_debug_data_object_file;
-  
+
   return nullptr;
 }
 
@@ -2695,6 +2709,9 @@ Symtab *ObjectFileELF::GetSymtab() {
   if (!module_sp)
     return nullptr;
 
+  Progress progress(llvm::formatv("Parsing symbol table for {0}",
+                                  m_file.GetFilename().AsCString("<Unknown>")));
+
   // We always want to use the main object file so we (hopefully) only have one
   // cached copy of our symtab, dynamic sections, etc.
   ObjectFile *module_obj_file = module_sp->GetObjectFile();
@@ -2717,7 +2734,7 @@ Symtab *ObjectFileELF::GetSymtab() {
     Section *symtab =
         section_list->FindSectionByType(eSectionTypeELFSymbolTable, true).get();
     if (symtab) {
-      m_symtab_up.reset(new Symtab(symtab->GetObjectFile()));
+      m_symtab_up = std::make_unique<Symtab>(symtab->GetObjectFile());
       symbol_id += ParseSymbolTable(m_symtab_up.get(), symbol_id, symtab);
     }
 
@@ -2734,7 +2751,7 @@ Symtab *ObjectFileELF::GetSymtab() {
               .get();
       if (dynsym) {
         if (!m_symtab_up)
-          m_symtab_up.reset(new Symtab(dynsym->GetObjectFile()));
+          m_symtab_up = std::make_unique<Symtab>(dynsym->GetObjectFile());
         symbol_id += ParseSymbolTable(m_symtab_up.get(), symbol_id, dynsym);
       }
     }
@@ -2758,30 +2775,31 @@ Symtab *ObjectFileELF::GetSymtab() {
         user_id_t reloc_id = reloc_section->GetID();
         const ELFSectionHeaderInfo *reloc_header =
             GetSectionHeaderByIndex(reloc_id);
-        assert(reloc_header);
+        if (reloc_header) {
+          if (m_symtab_up == nullptr)
+            m_symtab_up =
+                std::make_unique<Symtab>(reloc_section->GetObjectFile());
 
-        if (m_symtab_up == nullptr)
-          m_symtab_up.reset(new Symtab(reloc_section->GetObjectFile()));
-
-        ParseTrampolineSymbols(m_symtab_up.get(), symbol_id, reloc_header,
-                               reloc_id);
+          ParseTrampolineSymbols(m_symtab_up.get(), symbol_id, reloc_header,
+                                 reloc_id);
+        }
       }
     }
 
     if (DWARFCallFrameInfo *eh_frame =
             GetModule()->GetUnwindTable().GetEHFrameInfo()) {
       if (m_symtab_up == nullptr)
-        m_symtab_up.reset(new Symtab(this));
+        m_symtab_up = std::make_unique<Symtab>(this);
       ParseUnwindSymbols(m_symtab_up.get(), eh_frame);
     }
 
     // If we still don't have any symtab then create an empty instance to avoid
     // do the section lookup next time.
     if (m_symtab_up == nullptr)
-      m_symtab_up.reset(new Symtab(this));
+      m_symtab_up = std::make_unique<Symtab>(this);
 
     // In the event that there's no symbol entry for the entry point we'll
-    // artifically create one. We delegate to the symtab object the figuring
+    // artificially create one. We delegate to the symtab object the figuring
     // out of the proper size, this will usually make it span til the next
     // symbol it finds in the section. This means that if there are missing
     // symbols the entry point might span beyond its function definition.
@@ -2878,7 +2896,7 @@ void ObjectFileELF::ParseUnwindSymbols(Symtab *symbol_table,
     return;
 
   // First we save the new symbols into a separate list and add them to the
-  // symbol table after we colleced all symbols we want to add. This is
+  // symbol table after we collected all symbols we want to add. This is
   // neccessary because adding a new symbol invalidates the internal index of
   // the symtab what causing the next lookup to be slow because it have to
   // recalculate the index first.
@@ -2957,7 +2975,8 @@ void ObjectFileELF::Dump(Stream *s) {
   s->EOL();
   SectionList *section_list = GetSectionList();
   if (section_list)
-    section_list->Dump(s, nullptr, true, UINT32_MAX);
+    section_list->Dump(s->AsRawOstream(), s->GetIndentLevel(), nullptr, true,
+                       UINT32_MAX);
   Symtab *symtab = GetSymtab();
   if (symtab)
     symtab->Dump(s, nullptr, eSortOrderNone);

@@ -11,15 +11,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_ANALYSIS_DEPENDENCE_GRAPH_BUILDER_H
-#define LLVM_ANALYSIS_DEPENDENCE_GRAPH_BUILDER_H
+#ifndef LLVM_ANALYSIS_DEPENDENCEGRAPHBUILDER_H
+#define LLVM_ANALYSIS_DEPENDENCEGRAPHBUILDER_H
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/EquivalenceClasses.h"
-#include "llvm/Analysis/DependenceAnalysis.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Instructions.h"
+#include "llvm/ADT/SmallVector.h"
 
 namespace llvm {
+
+class BasicBlock;
+class DependenceInfo;
+class Instruction;
 
 /// This abstract builder class defines a set of high-level steps for creating
 /// DDG-like graphs. The client code is expected to inherit from this class and
@@ -197,4 +200,4 @@ protected:
 
 } // namespace llvm
 
-#endif // LLVM_ANALYSIS_DEPENDENCE_GRAPH_BUILDER_H
+#endif // LLVM_ANALYSIS_DEPENDENCEGRAPHBUILDER_H

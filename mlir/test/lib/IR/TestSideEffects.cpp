@@ -12,9 +12,10 @@
 using namespace mlir;
 
 namespace {
-struct SideEffectsPass : public ModulePass<SideEffectsPass> {
-  void runOnModule() override {
-    auto module = getModule();
+struct SideEffectsPass
+    : public PassWrapper<SideEffectsPass, OperationPass<ModuleOp>> {
+  void runOnOperation() override {
+    auto module = getOperation();
 
     // Walk operations detecting side effects.
     SmallVector<MemoryEffects::EffectInstance, 8> effects;
@@ -42,8 +43,24 @@ struct SideEffectsPass : public ModulePass<SideEffectsPass> {
 
         if (instance.getValue())
           diag << " on a value,";
+        else if (SymbolRefAttr symbolRef = instance.getSymbolRef())
+          diag << " on a symbol '" << symbolRef << "',";
 
         diag << " on resource '" << instance.getResource()->getName() << "'";
+      }
+    });
+
+    SmallVector<TestEffects::EffectInstance, 1> testEffects;
+    module.walk([&](TestEffectOpInterface op) {
+      testEffects.clear();
+      op.getEffects(testEffects);
+
+      if (testEffects.empty())
+        return;
+
+      for (const TestEffects::EffectInstance &instance : testEffects) {
+        op.emitRemark() << "found a parametric effect with "
+                        << instance.getParameters();
       }
     });
   }

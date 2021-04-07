@@ -30,7 +30,7 @@ mystr:
 # CHECK: Disassembly of section .R_AARCH64_ADR_PREL_PG_H121:
 # CHECK-EMPTY:
 # CHECK-NEXT: <$x.2>:
-# CHECK-NEXT:   210132:       01 00 00 90     adrp    x1, #0
+# CHECK-NEXT:   210132:       01 00 00 90     adrp    x1, 0x210000
 
 .section .R_AARCH64_ADD_ABS_LO12_NC,"ax",@progbits
   add x0, x0, :lo12:.L.str
@@ -83,7 +83,7 @@ call26:
 # CHECK: Disassembly of section .R_AARCH64_CALL26:
 # CHECK-EMPTY:
 # CHECK-NEXT: <call26>:
-# CHECK-NEXT:   210154:       ff ff ff 97     bl     #-4
+# CHECK-NEXT:   210154:       ff ff ff 97     bl     0x210150
 
 .section .R_AARCH64_JUMP26,"ax",@progbits
 jump26:
@@ -96,7 +96,7 @@ jump26:
 # CHECK: Disassembly of section .R_AARCH64_JUMP26:
 # CHECK-EMPTY:
 # CHECK-NEXT: <jump26>:
-# CHECK-NEXT:   210158:       fe ff ff 17     b      #-8
+# CHECK-NEXT:   210158:       fe ff ff 17     b      0x210150
 
 .section .R_AARCH64_LDST32_ABS_LO12_NC,"ax",@progbits
 ldst32:

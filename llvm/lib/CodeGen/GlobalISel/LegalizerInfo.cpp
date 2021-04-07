@@ -105,6 +105,7 @@ raw_ostream &LegalityQuery::print(raw_ostream &OS) const {
 static bool hasNoSimpleLoops(const LegalizeRule &Rule, const LegalityQuery &Q,
                              const std::pair<unsigned, LLT> &Mutation) {
   switch (Rule.getAction()) {
+  case Legal:
   case Custom:
   case Lower:
   case MoreElements:
@@ -122,7 +123,7 @@ static bool mutationIsSane(const LegalizeRule &Rule,
                            std::pair<unsigned, LLT> Mutation) {
   // If the user wants a custom mutation, then we can't really say much about
   // it. Return true, and trust that they're doing the right thing.
-  if (Rule.getAction() == Custom)
+  if (Rule.getAction() == Custom || Rule.getAction() == Legal)
     return true;
 
   const unsigned TypeIdx = Mutation.first;
@@ -147,7 +148,8 @@ static bool mutationIsSane(const LegalizeRule &Rule,
         if (NewTy.getNumElements() <= OldElts)
           return false;
       }
-    }
+    } else if (Rule.getAction() == MoreElements)
+      return false;
 
     // Make sure the element type didn't change.
     return NewTy.getScalarType() == OldTy.getScalarType();
@@ -444,8 +446,8 @@ LegalizeRuleSet &LegalizerInfo::getActionDefinitionsBuilder(
   assert(!llvm::empty(Opcodes) && Opcodes.begin() + 1 != Opcodes.end() &&
          "Initializer list must have at least two opcodes");
 
-  for (auto I = Opcodes.begin() + 1, E = Opcodes.end(); I != E; ++I)
-    aliasActionDefinitions(Representative, *I);
+  for (unsigned Op : llvm::drop_begin(Opcodes))
+    aliasActionDefinitions(Representative, Op);
 
   auto &Return = getActionDefinitionsBuilder(Representative);
   Return.setIsAliasedByAnother();
@@ -506,8 +508,7 @@ LegalizerInfo::getAction(const MachineInstr &MI,
   SmallVector<LegalityQuery::MemDesc, 2> MemDescrs;
   for (const auto &MMO : MI.memoperands())
     MemDescrs.push_back({8 * MMO->getSize() /* in bits */,
-                         8 * MMO->getAlignment(),
-                         MMO->getOrdering()});
+                         8 * MMO->getAlign().value(), MMO->getOrdering()});
 
   return getAction({MI.getOpcode(), Types, MemDescrs});
 }
@@ -523,12 +524,6 @@ bool LegalizerInfo::isLegalOrCustom(const MachineInstr &MI,
   // If the action is custom, it may not necessarily modify the instruction,
   // so we have to assume it's legal.
   return Action == Legal || Action == Custom;
-}
-
-bool LegalizerInfo::legalizeCustom(MachineInstr &MI, MachineRegisterInfo &MRI,
-                                   MachineIRBuilder &MIRBuilder,
-                                   GISelChangeObserver &Observer) const {
-  return false;
 }
 
 LegalizerInfo::SizeAndActionsVec
@@ -686,12 +681,6 @@ LegalizerInfo::findVectorLegalAction(const InstrAspect &Aspect) const {
   return {NumElementsAndAction.second,
           LLT::vector(NumElementsAndAction.first,
                       IntermediateType.getScalarSizeInBits())};
-}
-
-bool LegalizerInfo::legalizeIntrinsic(MachineInstr &MI,
-                                      MachineIRBuilder &MIRBuilder,
-                                      GISelChangeObserver &Observer) const {
-  return true;
 }
 
 unsigned LegalizerInfo::getExtOpcodeForWideningConstant(LLT SmallTy) const {

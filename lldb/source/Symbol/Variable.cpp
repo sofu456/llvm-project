@@ -40,12 +40,13 @@ Variable::Variable(lldb::user_id_t uid, const char *name, const char *mangled,
                    ValueType scope, SymbolContextScope *context,
                    const RangeList &scope_range, Declaration *decl_ptr,
                    const DWARFExpression &location, bool external,
-                   bool artificial, bool static_member)
+                   bool artificial, bool location_is_constant_data,
+                   bool static_member)
     : UserID(uid), m_name(name), m_mangled(ConstString(mangled)),
       m_symfile_type_sp(symfile_type_sp), m_scope(scope),
       m_owner_scope(context), m_scope_range(scope_range),
       m_declaration(decl_ptr), m_location(location), m_external(external),
-      m_artificial(artificial), m_loc_is_const_data(false),
+      m_artificial(artificial), m_loc_is_const_data(location_is_constant_data),
       m_static_member(static_member) {}
 
 Variable::~Variable() {}
@@ -529,7 +530,7 @@ static void PrivateAutoCompleteMembers(
           i, member_name, nullptr, nullptr, nullptr);
 
       if (partial_member_name.empty() ||
-          member_name.find(partial_member_name) == 0) {
+          llvm::StringRef(member_name).startswith(partial_member_name)) {
         if (member_name == partial_member_name) {
           PrivateAutoComplete(
               frame, partial_path,

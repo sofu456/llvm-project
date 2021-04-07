@@ -18,7 +18,17 @@
 #include "llvm/ADT/SetVector.h"
 
 namespace polly {
-using namespace llvm;
+using llvm::AllocaInst;
+using llvm::BasicBlock;
+using llvm::DataLayout;
+using llvm::DominatorTree;
+using llvm::Function;
+using llvm::ICmpInst;
+using llvm::LoopInfo;
+using llvm::Module;
+using llvm::SetVector;
+using llvm::Type;
+using llvm::Value;
 
 /// General scheduling types of parallel OpenMP for loops.
 /// Initialization values taken from OpenMP's enum in kmp.h: sched_type.
@@ -188,7 +198,7 @@ public:
   /// @param LB         The lower bound for the loop we parallelize.
   /// @param UB         The upper bound for the loop we parallelize.
   /// @param Stride     The stride of the loop we parallelize.
-  virtual void deployParallelExecution(Value *SubFn, Value *SubFnParam,
+  virtual void deployParallelExecution(Function *SubFn, Value *SubFnParam,
                                        Value *LB, Value *UB, Value *Stride) = 0;
 
   /// Prepare the definition of the parallel subfunction.

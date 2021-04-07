@@ -9,6 +9,9 @@ bar:
 ; CHECK: R_AVR_LDI SYMBOL+0x3
 ldi r21, SYMBOL+3
 
+; CHECK: R_AVR_6 SYMBOL+0x4
+ldd r8, Y+SYMBOL+4
+
 ; CHECK-NEXT: R_AVR_6_ADIW FOO
 adiw r24, FOO
 
@@ -132,11 +135,14 @@ ldi r17, lo8(gs(foo))
 ; CHECK-NEXT: R_AVR_HI8_LDI_GS foo
 ldi r18, hi8(gs(foo))
 
-; CHECK-NEXT: R_AVR_16
+; CHECK-NEXT: R_AVR_16 foo
 .short foo
 
-; CHECK-NEXT: R_AVR_16_PM
+; CHECK-NEXT: R_AVR_16_PM foo
 .short gs(foo)
+
+; CHECK-NEXT: R_AVR_16_PM foo
+.short pm(foo)
 
 ; CHECK-NEXT: R_AVR_8
 .byte foo

@@ -1,4 +1,4 @@
-//===-- VOPCInstructions.td - Vector Instruction Defintions ---------------===//
+//===-- VOPCInstructions.td - Vector Instruction Definitions --------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -92,9 +92,11 @@ class VOPC_Pseudo <string opName, VOPC_Profile P, list<dag> pattern=[],
   let mayStore = 0;
   let hasSideEffects = 0;
 
+  let ReadsModeReg = isFloatType<P.Src0VT>.ret;
+
   let VALU = 1;
   let VOPC = 1;
-  let Uses = [EXEC];
+  let Uses = !if(ReadsModeReg, [MODE, EXEC], [EXEC]);
   let Defs = !if(DefVcc, [VCC], []);
 
   VOPProfile Pfl = P;
@@ -119,6 +121,7 @@ class VOPC_Real <VOPC_Pseudo ps, int EncodingFamily> :
   let UseNamedOperandTable = ps.UseNamedOperandTable;
   let Uses                 = ps.Uses;
   let Defs                 = ps.Defs;
+  let SchedRW              = ps.SchedRW;
 }
 
 class VOPC_SDWA_Pseudo <string OpName, VOPProfile P, list<dag> pattern=[]> :
@@ -227,7 +230,7 @@ multiclass VOPC_Pseudos <string opName,
 
   foreach _ = BoolToList<P.HasExtSDWA>.ret in
   def _sdwa : VOPC_SDWA_Pseudo <opName, P> {
-    let Defs = !if(DefExec, [VCC, EXEC], [VCC]);
+    let Defs = !if(DefExec, [EXEC], []);
     let SchedRW = P.Schedule;
     let isConvergent = DefExec;
     let isCompare = 1;
@@ -738,6 +741,9 @@ multiclass VOPC_CLASS_F64 <string opName> :
 multiclass VOPCX_CLASS_F64 <string opName> :
   VOPCX_Class_Pseudos <opName, VOPC_I1_F64_I32, VOPC_F64_I32>;
 
+// cmp_class ignores the FP mode and faithfully reports the unmodified
+// source value.
+let ReadsModeReg = 0, mayRaiseFPException = 0 in {
 defm V_CMP_CLASS_F32 : VOPC_CLASS_F32 <"v_cmp_class_f32">;
 defm V_CMPX_CLASS_F32 : VOPCX_CLASS_F32 <"v_cmpx_class_f32">;
 defm V_CMP_CLASS_F64 : VOPC_CLASS_F64 <"v_cmp_class_f64">;
@@ -747,6 +753,7 @@ let SubtargetPredicate = Has16BitInsts in {
 defm V_CMP_CLASS_F16  : VOPC_CLASS_F16 <"v_cmp_class_f16">;
 defm V_CMPX_CLASS_F16 : VOPCX_CLASS_F16 <"v_cmpx_class_f16">;
 }
+} // End ReadsModeReg = 0, mayRaiseFPException = 0
 
 //===----------------------------------------------------------------------===//
 // V_ICMPIntrinsic Pattern.
@@ -754,7 +761,7 @@ defm V_CMPX_CLASS_F16 : VOPCX_CLASS_F16 <"v_cmpx_class_f16">;
 
 // We need to use COPY_TO_REGCLASS to w/a the problem when ReplaceAllUsesWith()
 // complaints it cannot replace i1 <-> i64/i32 if node was not morphed in place.
-multiclass ICMP_Pattern <PatLeaf cond, Instruction inst, ValueType vt> {
+multiclass ICMP_Pattern <PatFrags cond, Instruction inst, ValueType vt> {
   let WaveSizePredicate = isWave64 in
   def : GCNPat <
     (i64 (AMDGPUsetcc vt:$src0, vt:$src1, cond)),
@@ -801,7 +808,7 @@ defm : ICMP_Pattern <COND_SGE, V_CMP_GE_I16_e64, i16>;
 defm : ICMP_Pattern <COND_SLT, V_CMP_LT_I16_e64, i16>;
 defm : ICMP_Pattern <COND_SLE, V_CMP_LE_I16_e64, i16>;
 
-multiclass FCMP_Pattern <PatLeaf cond, Instruction inst, ValueType vt> {
+multiclass FCMP_Pattern <PatFrags cond, Instruction inst, ValueType vt> {
   let WaveSizePredicate = isWave64 in
   def : GCNPat <
     (i64 (AMDGPUsetcc (vt (VOP3Mods vt:$src0, i32:$src0_modifiers)),

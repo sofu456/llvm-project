@@ -1216,6 +1216,7 @@ void RNBRemote::StopReadRemoteDataThread() {
   PThreadEvent &events = m_ctx.Events();
   if ((events.GetEventBits() & RNBContext::event_read_thread_running) ==
       RNBContext::event_read_thread_running) {
+    DNBLog("debugserver about to shut down packet communications to lldb.");
     m_comm.Disconnect(true);
     struct timespec timeout_abstime;
     DNBTimer::OffsetTimeOfDay(&timeout_abstime, 2, 0);
@@ -1643,7 +1644,9 @@ rnb_err_t RNBRemote::HandlePacket_qLaunchSuccess(const char *p) {
     return SendPacket("OK");
   std::ostringstream ret_str;
   std::string status_str;
-  ret_str << "E" << m_ctx.LaunchStatusAsString(status_str);
+  std::string error_quoted = binary_encode_string
+               (m_ctx.LaunchStatusAsString(status_str));
+  ret_str << "E" << error_quoted;
 
   return SendPacket(ret_str.str());
 }
@@ -2677,8 +2680,9 @@ std::string cstring_to_asciihex_string(const char *str) {
   std::string hex_str;
   hex_str.reserve (strlen (str) * 2);
   while (str && *str) {
+    uint8_t c = *str++;
     char hexbuf[5];
-    snprintf (hexbuf, sizeof(hexbuf), "%02x", *str++);
+    snprintf (hexbuf, sizeof(hexbuf), "%02x", c);
     hex_str += hexbuf;
   }
   return hex_str;
@@ -3063,7 +3067,7 @@ rnb_err_t RNBRemote::HandlePacket_last_signal(const char *unused) {
                  WEXITSTATUS(pid_status));
       else if (WIFSIGNALED(pid_status))
         snprintf(pid_exited_packet, sizeof(pid_exited_packet), "X%02x",
-                 WEXITSTATUS(pid_status));
+                 WTERMSIG(pid_status));
       else if (WIFSTOPPED(pid_status))
         snprintf(pid_exited_packet, sizeof(pid_exited_packet), "S%02x",
                  WSTOPSIG(pid_status));
@@ -3663,30 +3667,6 @@ static bool process_does_not_exist (nub_process_t pid) {
   return true; // process does not exist
 }
 
-static bool attach_failed_due_to_sip (nub_process_t pid) {
-  bool retval = false;
-#if defined(__APPLE__) &&                                                      \
-  (__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 101000)
-
-  // csr_check(CSR_ALLOW_TASK_FOR_PID) will be nonzero if System Integrity
-  // Protection is in effect.
-  if (csr_check(CSR_ALLOW_TASK_FOR_PID) == 0) 
-    return false;
-
-  if (rootless_allows_task_for_pid(pid) == 0)
-    retval = true;
-
-  int csops_flags = 0;
-  int csops_ret = ::csops(pid, CS_OPS_STATUS, &csops_flags,
-                       sizeof(csops_flags));
-  if (csops_ret != -1 && (csops_flags & CS_RESTRICT)) {
-    retval = true;
-  }
-#endif
-
-  return retval;
-}
-
 // my_uid and process_uid are only initialized if this function
 // returns true -- that there was a uid mismatch -- and those
 // id's may want to be used in the error message.
@@ -3946,10 +3926,12 @@ rnb_err_t RNBRemote::HandlePacket_v(const char *p) {
         return HandlePacket_ILLFORMED(
             __FILE__, __LINE__, p, "non-hex char in arg on 'vAttachWait' pkt");
       }
+      DNBLog("[LaunchAttach] START %d vAttachWait for process name '%s'",
+             getpid(), attach_name.c_str());
       const bool ignore_existing = true;
       attach_pid = DNBProcessAttachWait(
-          attach_name.c_str(), m_ctx.LaunchFlavor(), ignore_existing, NULL,
-          1000, err_str, sizeof(err_str), RNBRemoteShouldCancelCallback);
+          &m_ctx, attach_name.c_str(), ignore_existing, NULL, 1000, err_str,
+          sizeof(err_str), RNBRemoteShouldCancelCallback);
 
     } else if (strstr(p, "vAttachOrWait;") == p) {
       p += strlen("vAttachOrWait;");
@@ -3959,9 +3941,12 @@ rnb_err_t RNBRemote::HandlePacket_v(const char *p) {
             "non-hex char in arg on 'vAttachOrWait' pkt");
       }
       const bool ignore_existing = false;
+      DNBLog("[LaunchAttach] START %d vAttachWaitOrWait for process name "
+             "'%s'",
+             getpid(), attach_name.c_str());
       attach_pid = DNBProcessAttachWait(
-          attach_name.c_str(), m_ctx.LaunchFlavor(), ignore_existing, NULL,
-          1000, err_str, sizeof(err_str), RNBRemoteShouldCancelCallback);
+          &m_ctx, attach_name.c_str(), ignore_existing, NULL, 1000, err_str,
+          sizeof(err_str), RNBRemoteShouldCancelCallback);
     } else if (strstr(p, "vAttachName;") == p) {
       p += strlen("vAttachName;");
       if (!GetProcessNameFrom_vAttach(p, attach_name)) {
@@ -3969,7 +3954,11 @@ rnb_err_t RNBRemote::HandlePacket_v(const char *p) {
             __FILE__, __LINE__, p, "non-hex char in arg on 'vAttachName' pkt");
       }
 
-      attach_pid = DNBProcessAttachByName(attach_name.c_str(), NULL, err_str,
+      DNBLog("[LaunchAttach] START %d vAttachName attach to process name "
+             "'%s'",
+             getpid(), attach_name.c_str());
+      attach_pid = DNBProcessAttachByName(attach_name.c_str(), NULL,
+                                          Context().GetUnmaskSignals(), err_str,
                                           sizeof(err_str));
 
     } else if (strstr(p, "vAttach;") == p) {
@@ -3981,8 +3970,10 @@ rnb_err_t RNBRemote::HandlePacket_v(const char *p) {
         // Wait at most 30 second for attach
         struct timespec attach_timeout_abstime;
         DNBTimer::OffsetTimeOfDay(&attach_timeout_abstime, 30, 0);
+        DNBLog("[LaunchAttach] START %d vAttach to pid %d", getpid(),
+               pid_attaching_to);
         attach_pid = DNBProcessAttach(pid_attaching_to, &attach_timeout_abstime,
-                                      err_str, sizeof(err_str));
+                                      false, err_str, sizeof(err_str));
       }
     } else {
       return HandlePacket_UNIMPLEMENTED(p);
@@ -3991,10 +3982,12 @@ rnb_err_t RNBRemote::HandlePacket_v(const char *p) {
     if (attach_pid != INVALID_NUB_PROCESS) {
       if (m_ctx.ProcessID() != attach_pid)
         m_ctx.SetProcessID(attach_pid);
+      DNBLog("Successfully attached to pid %d", attach_pid);
       // Send a stop reply packet to indicate we successfully attached!
       NotifyThatProcessStopped();
       return rnb_success;
     } else {
+      DNBLogError("Attach failed");
       m_ctx.LaunchStatus().SetError(-1, DNBError::Generic);
       if (err_str[0])
         m_ctx.LaunchStatus().SetErrorString(err_str);
@@ -4065,13 +4058,6 @@ rnb_err_t RNBRemote::HandlePacket_v(const char *p) {
                                            "processes.");
           return SendPacket(return_message.c_str());
         }
-        if (attach_failed_due_to_sip (pid_attaching_to)) {
-          DNBLogError("Attach failed because of SIP protection.");
-          std::string return_message = "E96;";
-          return_message += cstring_to_asciihex_string("cannot attach "
-                            "to process due to System Integrity Protection");
-          return SendPacket(return_message.c_str());
-        }
       }
 
       std::string error_explainer = "attach failed";
@@ -4080,8 +4066,8 @@ rnb_err_t RNBRemote::HandlePacket_v(const char *p) {
         if (strcmp (err_str, "unable to start the exception thread") == 0) {
           snprintf (err_str, sizeof (err_str) - 1,
                     "Not allowed to attach to process.  Look in the console "
-                    "messages (Console.app), near the debugserver entries "
-                    "when the attached failed.  The subsystem that denied "
+                    "messages (Console.app), near the debugserver entries, "
+                    "when the attach failed.  The subsystem that denied "
                     "the attach permission will likely have logged an "
                     "informative message about why it was denied.");
           err_str[sizeof (err_str) - 1] = '\0';
@@ -4592,7 +4578,8 @@ rnb_err_t RNBRemote::HandlePacket_qSpeedTest(const char *p) {
         __FILE__, __LINE__, p,
         "Didn't find response_size value at right offset");
   else if (*end == ';') {
-    static char g_data[4 * 1024 * 1024 + 16] = "data:";
+    static char g_data[4 * 1024 * 1024 + 16];
+    strcpy(g_data, "data:");
     memset(g_data + 5, 'a', response_size);
     g_data[response_size + 5] = '\0';
     return SendPacket(g_data);
@@ -4672,10 +4659,14 @@ rnb_err_t RNBRemote::HandlePacket_C(const char *p) {
 // Detach from gdb.
 rnb_err_t RNBRemote::HandlePacket_D(const char *p) {
   if (m_ctx.HasValidProcessID()) {
+    DNBLog("detaching from pid %u due to D packet", m_ctx.ProcessID());
     if (DNBProcessDetach(m_ctx.ProcessID()))
       SendPacket("OK");
-    else
+    else {
+      DNBLog("error while detaching from pid %u due to D packet",
+             m_ctx.ProcessID());
       SendPacket("E");
+    }
   } else {
     SendPacket("E");
   }
@@ -4936,6 +4927,8 @@ rnb_err_t RNBRemote::HandlePacket_qHostInfo(const char *p) {
     strm << "ostype:watchos;";
 #elif defined(TARGET_OS_BRIDGE) && TARGET_OS_BRIDGE == 1
     strm << "ostype:bridgeos;";
+#elif defined(TARGET_OS_OSX) && TARGET_OS_OSX == 1
+    strm << "ostype:macosx;";
 #else
     strm << "ostype:ios;";
 #endif
@@ -6364,7 +6357,7 @@ rnb_err_t RNBRemote::HandlePacket_qProcessInfo(const char *p) {
   if (addr_size > 0) {
     rep << "ptrsize:" << std::dec << addr_size << ';';
 
-#if (defined(__x86_64__) || defined(__i386__))
+#if defined(TARGET_OS_OSX) && TARGET_OS_OSX == 1
     // Try and get the OS type by looking at the load commands in the main
     // executable and looking for a LC_VERSION_MIN load command. This is the
     // most reliable way to determine the "ostype" value when on desktop.
@@ -6382,10 +6375,11 @@ rnb_err_t RNBRemote::HandlePacket_qProcessInfo(const char *p) {
             DNBProcessMemoryRead(pid, load_command_addr, sizeof(lc), &lc);
         (void)bytes_read;
 
+        bool is_executable = true;
         uint32_t major_version, minor_version, patch_version;
-        auto *platform = DNBGetDeploymentInfo(pid, lc, load_command_addr,
-                                              major_version, minor_version,
-                                              patch_version);
+        auto *platform =
+            DNBGetDeploymentInfo(pid, is_executable, lc, load_command_addr,
+                                 major_version, minor_version, patch_version);
         if (platform) {
           os_handled = true;
           rep << "ostype:" << platform << ";";
@@ -6394,7 +6388,7 @@ rnb_err_t RNBRemote::HandlePacket_qProcessInfo(const char *p) {
         load_command_addr = load_command_addr + lc.cmdsize;
       }
     }
-#endif // when compiling this on x86 targets
+#endif // TARGET_OS_OSX
   }
 
   // If we weren't able to find the OS in a LC_VERSION_MIN load command, try
@@ -6411,6 +6405,8 @@ rnb_err_t RNBRemote::HandlePacket_qProcessInfo(const char *p) {
       rep << "ostype:watchos;";
 #elif defined(TARGET_OS_BRIDGE) && TARGET_OS_BRIDGE == 1
       rep << "ostype:bridgeos;";
+#elif defined(TARGET_OS_OSX) && TARGET_OS_OSX == 1
+      rep << "ostype:macosx;";
 #else
       rep << "ostype:ios;";
 #endif

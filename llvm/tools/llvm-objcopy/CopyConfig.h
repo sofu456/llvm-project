@@ -12,6 +12,7 @@
 #include "ELF/ELFConfig.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitmaskEnum.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -162,9 +163,6 @@ struct CopyConfig {
   StringRef AddGnuDebugLink;
   // Cached gnu_debuglink's target CRC
   uint32_t GnuDebugLinkCRC32;
-  StringRef BuildIdLinkDir;
-  Optional<StringRef> BuildIdLinkInput;
-  Optional<StringRef> BuildIdLinkOutput;
   Optional<StringRef> ExtractPartition;
   StringRef SplitDWO;
   StringRef SymbolsPrefix;
@@ -177,6 +175,13 @@ struct CopyConfig {
   std::vector<StringRef> DumpSection;
   std::vector<StringRef> SymbolsToAdd;
   std::vector<StringRef> RPathToAdd;
+  std::vector<StringRef> RPathToPrepend;
+  DenseMap<StringRef, StringRef> RPathsToUpdate;
+  DenseMap<StringRef, StringRef> InstallNamesToUpdate;
+  DenseSet<StringRef> RPathsToRemove;
+
+  // install-name-tool's id option
+  Optional<StringRef> SharedLibId;
 
   // Section matchers
   NameMatcher KeepSection;
@@ -210,6 +215,7 @@ struct CopyConfig {
   bool ExtractDWO = false;
   bool ExtractMainPartition = false;
   bool KeepFileSymbols = false;
+  bool KeepUndefined = false;
   bool LocalizeHidden = false;
   bool OnlyKeepDebug = false;
   bool PreserveDates = false;
@@ -219,9 +225,13 @@ struct CopyConfig {
   bool StripDebug = false;
   bool StripNonAlloc = false;
   bool StripSections = false;
+  bool StripSwiftSymbols = false;
   bool StripUnneeded = false;
   bool Weaken = false;
   bool DecompressDebugSections = false;
+  // install-name-tool's --delete_all_rpaths
+  bool RemoveAllRpaths = false;
+
   DebugCompressionType CompressionType = DebugCompressionType::None;
 
   // parseELFConfig performs ELF-specific command-line parsing. Fills `ELF` on
@@ -258,6 +268,11 @@ parseObjcopyOptions(ArrayRef<const char *> ArgsArr,
 // messege and exit.
 Expected<DriverConfig>
 parseInstallNameToolOptions(ArrayRef<const char *> ArgsArr);
+
+// ParseBitcodeStripOptions returns the config and sets the input arguments.
+// If a help flag is set then ParseBitcodeStripOptions will print the help
+// messege and exit.
+Expected<DriverConfig> parseBitcodeStripOptions(ArrayRef<const char *> ArgsArr);
 
 // ParseStripOptions returns the config and sets the input arguments. If a
 // help flag is set then ParseStripOptions will print the help messege and

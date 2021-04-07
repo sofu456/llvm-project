@@ -57,7 +57,7 @@ TEST(VerifierTest, Freeze) {
   ConstantInt *CI = ConstantInt::get(ITy, 0);
 
   // Valid type : freeze(<2 x i32>)
-  Constant *CV = ConstantVector::getSplat({2, false}, CI);
+  Constant *CV = ConstantVector::getSplat(ElementCount::getFixed(2), CI);
   FreezeInst *FI_vec = new FreezeInst(CV);
   FI_vec->insertBefore(RI);
 
@@ -236,6 +236,21 @@ TEST(VerifierTest, DetectInvalidDebugInfo) {
     M.eraseNamedMetadata(M.getOrInsertNamedMetadata("llvm.dbg.cu"));
     EXPECT_TRUE(verifyModule(M));
   }
+}
+
+TEST(VerifierTest, MDNodeWrongContext) {
+  LLVMContext C1, C2;
+  auto *Node = MDNode::get(C1, None);
+
+  Module M("M", C2);
+  auto *NamedNode = M.getOrInsertNamedMetadata("test");
+  NamedNode->addOperand(Node);
+
+  std::string Error;
+  raw_string_ostream ErrorOS(Error);
+  EXPECT_TRUE(verifyModule(M, &ErrorOS));
+  EXPECT_TRUE(StringRef(ErrorOS.str())
+                  .startswith("MDNode context does not match Module context!"));
 }
 
 } // end anonymous namespace

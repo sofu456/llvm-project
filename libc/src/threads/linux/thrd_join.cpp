@@ -1,4 +1,4 @@
-//===----------- Linux implementation of the thrd_join function -----------===//
+//===-- Linux implementation of the thrd_join function --------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -6,6 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "src/threads/thrd_join.h"
 #include "config/linux/syscall.h" // For syscall function.
 #include "include/sys/syscall.h"  // For syscall numbers.
 #include "include/threads.h"      // For thrd_* type definitions.
@@ -18,7 +19,7 @@
 
 namespace __llvm_libc {
 
-int LLVM_LIBC_ENTRYPOINT(thrd_join)(thrd_t *thread, int *retval) {
+LLVM_LIBC_FUNCTION(int, thrd_join, (thrd_t * thread, int *retval)) {
   FutexData *clear_tid_address =
       reinterpret_cast<FutexData *>(thread->__clear_tid);
 

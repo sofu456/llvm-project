@@ -11,6 +11,7 @@
 #include "../utils/OptionsUtils.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
+#include "clang/Lex/Token.h"
 #include <algorithm>
 #include <cctype>
 
@@ -47,6 +48,7 @@ ReservedIdentifierCheck::ReservedIdentifierCheck(StringRef Name,
           Options.get("AllowedIdentifiers", ""))) {}
 
 void ReservedIdentifierCheck::storeOptions(ClangTidyOptions::OptionMap &Opts) {
+  RenamerClangTidyCheck::storeOptions(Opts);
   Options.store(Opts, "Invert", Invert);
   Options.store(Opts, "AllowedIdentifiers",
                 utils::options::serializeStringList(AllowedIdentifiers));
@@ -170,8 +172,8 @@ ReservedIdentifierCheck::GetMacroFailureInfo(const Token &MacroNameTok,
 RenamerClangTidyCheck::DiagInfo
 ReservedIdentifierCheck::GetDiagInfo(const NamingCheckId &ID,
                                      const NamingCheckFailure &Failure) const {
-  return DiagInfo{Message, [&](DiagnosticBuilder &diag) {
-                    diag << ID.second
+  return DiagInfo{Message, [&](DiagnosticBuilder &Diag) {
+                    Diag << ID.second
                          << getMessageSelectIndex(Failure.Info.KindName);
                   }};
 }

@@ -28,11 +28,11 @@
 // RUN:   -analyzer-checker=alpha.security.taint \
 // RUN:   -analyzer-config \
 // RUN:     alpha.security.taint.TaintPropagation:Config=%S/Inputs/taint-generic-config-ill-formed.yaml \
-// RUN:   2>&1 | FileCheck %s -check-prefix=CHECK-ILL-FORMED
+// RUN:   2>&1 | FileCheck -DMSG=%errc_EINVAL %s -check-prefix=CHECK-ILL-FORMED
 
 // CHECK-ILL-FORMED: (frontend): invalid input for checker option
 // CHECK-ILL-FORMED-SAME:        'alpha.security.taint.TaintPropagation:Config',
-// CHECK-ILL-FORMED-SAME:        that expects a valid yaml file: {{[Ii]}}nvalid argument
+// CHECK-ILL-FORMED-SAME:        that expects a valid yaml file: [[MSG]]
 
 // RUN: not %clang_analyze_cc1 -verify %s \
 // RUN:   -analyzer-checker=alpha.security.taint \
@@ -389,4 +389,8 @@ void testConfigurationSinks() {
   mySink(1, x, 2); // no-warning
   mySink(1, 2, x);
   // expected-warning@-1 {{Untrusted data is passed to a user-defined sink}}
+}
+
+void testUnknownFunction(void (*foo)(void)) {
+  foo(); // no-crash
 }

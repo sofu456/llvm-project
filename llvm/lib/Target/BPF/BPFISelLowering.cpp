@@ -20,7 +20,6 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/CodeGen/SelectionDAGISel.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGen/ValueTypes.h"
 #include "llvm/IR/DiagnosticInfo.h"
@@ -78,6 +77,24 @@ BPFTargetLowering::BPFTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i64, Custom);
   setOperationAction(ISD::STACKSAVE, MVT::Other, Expand);
   setOperationAction(ISD::STACKRESTORE, MVT::Other, Expand);
+
+  // Set unsupported atomic operations as Custom so
+  // we can emit better error messages than fatal error
+  // from selectiondag.
+  for (auto VT : {MVT::i8, MVT::i16, MVT::i32}) {
+    if (VT == MVT::i32) {
+      if (STI.getHasAlu32())
+        continue;
+    } else {
+      setOperationAction(ISD::ATOMIC_LOAD_ADD, VT, Custom);
+    }
+
+    setOperationAction(ISD::ATOMIC_LOAD_AND, VT, Custom);
+    setOperationAction(ISD::ATOMIC_LOAD_OR, VT, Custom);
+    setOperationAction(ISD::ATOMIC_LOAD_XOR, VT, Custom);
+    setOperationAction(ISD::ATOMIC_SWAP, VT, Custom);
+    setOperationAction(ISD::ATOMIC_CMP_SWAP_WITH_SUCCESS, VT, Custom);
+  }
 
   for (auto VT : { MVT::i32, MVT::i64 }) {
     if (VT == MVT::i32 && !STI.getHasAlu32())
@@ -217,6 +234,30 @@ BPFTargetLowering::getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
     }
 
   return TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
+}
+
+void BPFTargetLowering::ReplaceNodeResults(
+  SDNode *N, SmallVectorImpl<SDValue> &Results, SelectionDAG &DAG) const {
+  const char *err_msg;
+  uint32_t Opcode = N->getOpcode();
+  switch (Opcode) {
+  default:
+    report_fatal_error("Unhandled custom legalization");
+  case ISD::ATOMIC_LOAD_ADD:
+  case ISD::ATOMIC_LOAD_AND:
+  case ISD::ATOMIC_LOAD_OR:
+  case ISD::ATOMIC_LOAD_XOR:
+  case ISD::ATOMIC_SWAP:
+  case ISD::ATOMIC_CMP_SWAP_WITH_SUCCESS:
+    if (HasAlu32 || Opcode == ISD::ATOMIC_LOAD_ADD)
+      err_msg = "Unsupported atomic operations, please use 32/64 bit version";
+    else
+      err_msg = "Unsupported atomic operations, please use 64 bit version";
+    break;
+  }
+
+  SDLoc DL(N);
+  fail(DL, DAG, err_msg);
 }
 
 SDValue BPFTargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
@@ -604,6 +645,12 @@ BPFTargetLowering::EmitSubregExt(MachineInstr &MI, MachineBasicBlock *BB,
   DebugLoc DL = MI.getDebugLoc();
 
   MachineRegisterInfo &RegInfo = F->getRegInfo();
+
+  if (!isSigned) {
+    Register PromotedReg0 = RegInfo.createVirtualRegister(RC);
+    BuildMI(BB, DL, TII.get(BPF::MOV_32_64), PromotedReg0).addReg(Reg);
+    return PromotedReg0;
+  }
   Register PromotedReg0 = RegInfo.createVirtualRegister(RC);
   Register PromotedReg1 = RegInfo.createVirtualRegister(RC);
   Register PromotedReg2 = RegInfo.createVirtualRegister(RC);

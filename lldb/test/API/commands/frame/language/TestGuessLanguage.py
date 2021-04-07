@@ -53,15 +53,15 @@ class TestFrameGuessLanguage(TestBase):
         # environment variables, add them using SetArguments or
         # SetEnvironmentEntries
 
-        launch_info = lldb.SBLaunchInfo(None)
+        launch_info = target.GetLaunchInfo()
         process = target.Launch(launch_info, error)
         self.assertTrue(process, PROCESS_IS_VALID)
 
         # Did we hit our breakpoint?
         from lldbsuite.test.lldbutil import get_threads_stopped_at_breakpoint
         threads = get_threads_stopped_at_breakpoint(process, breakpoint)
-        self.assertTrue(
-            len(threads) == 1,
+        self.assertEqual(
+            len(threads), 1,
             "There should be a thread stopped at our breakpoint")
 
         # The hit count for the breakpoint should be 1.

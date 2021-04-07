@@ -1,4 +1,4 @@
-//===----------------------- Unittests for strcpy -------------------------===//
+//===-- Unittests for strcpy ----------------------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -9,7 +9,7 @@
 #include "src/string/strcpy.h"
 #include "utils/UnitTest/Test.h"
 
-TEST(StrCpyTest, EmptyDest) {
+TEST(LlvmLibcStrCpyTest, EmptyDest) {
   const char *abc = "abc";
   char dest[4];
 
@@ -19,7 +19,7 @@ TEST(StrCpyTest, EmptyDest) {
   ASSERT_STREQ(dest, abc);
 }
 
-TEST(StrCpyTest, OffsetDest) {
+TEST(LlvmLibcStrCpyTest, OffsetDest) {
   const char *abc = "abc";
   char dest[7];
 

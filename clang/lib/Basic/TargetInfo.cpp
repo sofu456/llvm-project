@@ -36,6 +36,8 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : TargetOpts(), Triple(T) {
   HasLegalHalfType = false;
   HasFloat128 = false;
   HasFloat16 = false;
+  HasBFloat16 = false;
+  HasStrictFP = false;
   PointerWidth = PointerAlign = 32;
   BoolWidth = BoolAlign = 8;
   IntWidth = IntAlign = 32;
@@ -65,9 +67,12 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : TargetOpts(), Triple(T) {
   // From the glibc documentation, on GNU systems, malloc guarantees 16-byte
   // alignment on 64-bit systems and 8-byte alignment on 32-bit systems. See
   // https://www.gnu.org/software/libc/manual/html_node/Malloc-Examples.html.
-  // This alignment guarantee also applies to Windows and Android.
+  // This alignment guarantee also applies to Windows and Android. On Darwin,
+  // the alignment is 16 bytes on both 64-bit and 32-bit systems.
   if (T.isGNUEnvironment() || T.isWindowsMSVCEnvironment() || T.isAndroid())
     NewAlign = Triple.isArch64Bit() ? 128 : Triple.isArch32Bit() ? 64 : 0;
+  else if (T.isOSDarwin())
+    NewAlign = 128;
   else
     NewAlign = 0; // Infer from basic type alignment.
   HalfWidth = 16;
@@ -99,8 +104,10 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : TargetOpts(), Triple(T) {
   UseSignedCharForObjCBool = true;
   UseBitFieldTypeAlignment = true;
   UseZeroLengthBitfieldAlignment = false;
+  UseLeadingZeroLengthBitfield = true;
   UseExplicitBitFieldAlignment = true;
   ZeroLengthBitfieldBoundary = 0;
+  MaxAlignedAttribute = 0;
   HalfFormat = &llvm::APFloat::IEEEhalf();
   FloatFormat = &llvm::APFloat::IEEEsingle();
   DoubleFormat = &llvm::APFloat::IEEEdouble();
@@ -113,6 +120,8 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : TargetOpts(), Triple(T) {
   HasBuiltinMSVaList = false;
   IsRenderScriptTarget = false;
   HasAArch64SVETypes = false;
+  HasRISCVVTypes = false;
+  AllowAMDGPUUnsafeFPAtomics = false;
   ARMCDECoprocMask = 0;
 
   // Default to no types using fpret.
@@ -133,6 +142,8 @@ TargetInfo::TargetInfo(const llvm::Triple &T) : TargetOpts(), Triple(T) {
   // Default to an unknown platform name.
   PlatformName = "unknown";
   PlatformMinVersion = VersionTuple();
+
+  MaxOpenCLWorkGroupSize = 1024;
 }
 
 // Out of line virtual dtor for TargetInfo.
@@ -263,7 +274,8 @@ TargetInfo::IntType TargetInfo::getLeastIntTypeByWidth(unsigned BitWidth,
   return NoInt;
 }
 
-TargetInfo::RealType TargetInfo::getRealTypeByWidth(unsigned BitWidth) const {
+TargetInfo::RealType TargetInfo::getRealTypeByWidth(unsigned BitWidth,
+                                                    bool ExplicitIEEE) const {
   if (getFloatWidth() == BitWidth)
     return Float;
   if (getDoubleWidth() == BitWidth)
@@ -275,6 +287,10 @@ TargetInfo::RealType TargetInfo::getRealTypeByWidth(unsigned BitWidth) const {
       return LongDouble;
     break;
   case 128:
+    // The caller explicitly asked for an IEEE compliant type but we still
+    // have to check if the target supports it.
+    if (ExplicitIEEE)
+      return hasFloat128Type() ? Float128 : NoFloat;
     if (&getLongDoubleFormat() == &llvm::APFloat::PPCDoubleDouble() ||
         &getLongDoubleFormat() == &llvm::APFloat::IEEEquad())
       return LongDouble;

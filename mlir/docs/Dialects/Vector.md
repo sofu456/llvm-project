@@ -1,4 +1,4 @@
-# Vector Dialect
+# 'vector' Dialect
 
 [TOC]
 
@@ -44,7 +44,7 @@ bottom-up abstractions:
 intrinsics. This is referred to as the `LLVM` level.
 2. Set of machine-specific operations and types that are built to translate
 almost 1-1 with the HW ISA. This is referred to as the Hardware Vector level;
-a.k.a `HWV`. For instance, we have (a) a `NVVM` dialect (for `CUDA`) with
+a.k.a `HWV`. For instance, we have (a) the `NVVM` dialect (for `CUDA`) with
 tensor core ops, (b) accelerator-specific dialects (internal), a potential
 (future) `CPU` dialect to capture `LLVM` intrinsics more closely and other
 dialects for specific hardware. Ideally this should be auto-generated as much
@@ -116,10 +116,10 @@ vector.transfer_write %f1, %A[%i0, %i1, %i2, %i3]
 
 The list of Vector is currently undergoing evolutions and is best kept
 track of by following the evolution of the
-[VectorOps.td](https://github.com/llvm/llvm-project/blob/master/mlir/include/mlir/Dialect/Vector/VectorOps.td)
+[VectorOps.td](https://github.com/llvm/llvm-project/blob/main/mlir/include/mlir/Dialect/Vector/VectorOps.td)
 ODS file (markdown documentation is automatically generated locally when
 building and populates the [Vector
-doc](https://github.com/llvm/llvm-project/blob/master/mlir/docs/Dialects/Vector.md)). Recent
+doc](https://github.com/llvm/llvm-project/blob/main/mlir/docs/Dialects/Vector.md)). Recent
 extensions are driven by concrete use cases of interest. A notable such use
 case is the `vector.contract` op which applies principles of the StructuredOps
 abstraction to `vector` types.
@@ -149,7 +149,7 @@ or the [VectorOuterProductOp
 lowering](https://github.com/tensorflow/mlir/commit/957b1ca9680b4aacabb3a480fbc4ebd2506334b8)).
 
 Simple [conversion
-tests](https://github.com/llvm/llvm-project/blob/master/mlir/test/Conversion/VectorToLLVM/vector-to-llvm.mlir)
+tests](https://github.com/llvm/llvm-project/blob/main/mlir/test/Conversion/VectorToLLVM/vector-to-llvm.mlir)
 are available for the `LLVM` target starting from the Virtual Vector Level.
 
 ## Rationale
@@ -225,7 +225,7 @@ granularity.
 Irrespective of the existence of an auto-vectorizer, one can build a notional
 vector language based on the VectorOps dialect and build end-to-end models
 with expressing `vector`s in the IR directly and simple
-pattern-rewrites. [EDSC](https://github.com/llvm/llvm-project/blob/master/mlir/docs/EDSC.md)s
+pattern-rewrites. [EDSC](https://github.com/llvm/llvm-project/blob/main/mlir/docs/EDSC.md)s
 provide a simple way of driving such a notional language directly in C++.
 
 ## Bikeshed Naming Discussion
@@ -264,11 +264,11 @@ Consider a vector of rank n with  static sizes `{s_0, ... s_{n-1}}` (i.e. an
 MLIR `vector<s_0x...s_{n-1}xf32>`). Lowering such an `n-D` MLIR vector type to
 an LLVM descriptor can be done by either:
 
-1. Flattening to a `1-D` vector: `!llvm<"(s_0*...*s_{n-1})xfloat">` in the
-MLIR LLVM dialect.
-2. Nested aggregate type of `1-D` vector:
-`!llvm<"[s_0x[s_1x[...<s_{n-1}xfloat>]]]">` in the MLIR LLVM dialect.
-3. A mix of both.
+1.  Flattening to a `1-D` vector: `!llvm<"(s_0*...*s_{n-1})xfloat">` in the MLIR
+    LLVM dialect.
+2.  Nested aggregate type of `1-D` vector:
+    `!llvm."[s_0x[s_1x[...<s_{n-1}xf32>]]]">` in the MLIR LLVM dialect.
+3.  A mix of both.
 
 There are multiple tradeoffs involved in choosing one or the other that we
 discuss. It is important to note that “a mix of both” immediately reduces to
@@ -365,7 +365,7 @@ unsurprising because historically, the vast majority of HW only supports `1-D`
 vector registers. We note that multiple HW vendors are in the process of
 evolving to higher-dimensional physical vectors.
 
-In the following discussion, let's assume the HW vector size is `1-D and the
+In the following discussion, let's assume the HW vector size is `1-D` and the
 SW vector size is `n-D`, with `n >= 1`. The same discussion would apply with
 `2-D` HW `vector` size and `n >= 2`. In this context, most HW exhibit a vector
 register file. The number of such vectors is fixed.

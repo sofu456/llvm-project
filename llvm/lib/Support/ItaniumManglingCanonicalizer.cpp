@@ -7,15 +7,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Support/ItaniumManglingCanonicalizer.h"
-
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Demangle/ItaniumDemangle.h"
 #include "llvm/Support/Allocator.h"
-
-#include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/FoldingSet.h"
-#include "llvm/ADT/StringRef.h"
 
 using namespace llvm;
 using llvm::itanium_demangle::ForwardTemplateReference;
@@ -211,7 +207,7 @@ struct CanonicalizerAllocator::MakeNodeImpl<
 
 using CanonicalizingDemangler =
     itanium_demangle::ManglingParser<CanonicalizerAllocator>;
-}
+} // namespace
 
 struct ItaniumManglingCanonicalizer::Impl {
   CanonicalizingDemangler Demangler = {nullptr, nullptr};

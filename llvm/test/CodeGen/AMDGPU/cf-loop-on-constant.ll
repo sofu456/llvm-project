@@ -3,7 +3,7 @@
 
 ; GCN-LABEL: {{^}}test_loop:
 ; GCN: s_and_b64 vcc, exec, -1
-; GCN: [[LABEL:BB[0-9+]_[0-9]+]]: ; %for.body{{$}}
+; GCN: [[LABEL:BB[0-9]+_[0-9]+]]: ; %for.body{{$}}
 ; GCN: ds_read_b32
 ; GCN: ds_write_b32
 ; GCN: s_cbranch_vccnz [[LABEL]]
@@ -28,7 +28,7 @@ for.body:
 }
 
 ; GCN-LABEL: @loop_const_true
-; GCN: [[LABEL:BB[0-9+]_[0-9]+]]:
+; GCN: [[LABEL:BB[0-9]+_[0-9]+]]:
 ; GCN: ds_read_b32
 ; GCN: ds_write_b32
 ; GCN: s_branch [[LABEL]]
@@ -102,7 +102,7 @@ for.body:
 ; GCN: s_add_i32 s{{[0-9]+}}, s{{[0-9]+}}, 0x80
 ; GCN: s_add_i32 s{{[0-9]+}}, s{{[0-9]+}}, 4
 
-; GCN: s_cbranch_vccnz [[LOOPBB]]
+; GCN: s_cbranch_{{vccz|vccnz}} [[LOOPBB]]
 ; GCN-NEXT: ; %bb.2
 ; GCN-NEXT: s_endpgm
 define amdgpu_kernel void @loop_arg_0(float addrspace(3)* %ptr, i32 %n) nounwind {

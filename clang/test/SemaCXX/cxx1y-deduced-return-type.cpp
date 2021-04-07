@@ -22,7 +22,7 @@ int conv1d = conv1.operator int(); // expected-error {{no member named 'operator
 
 struct Conv2 {
   operator auto() { return 0; }  // expected-note {{previous}}
-  operator auto() { return 0.; } // expected-error {{cannot be redeclared}} expected-error {{cannot initialize return object of type 'auto' with an rvalue of type 'double'}}
+  operator auto() { return 0.; } // expected-error {{cannot be redeclared}}
 };
 
 struct Conv3 {
@@ -377,7 +377,7 @@ namespace MemberTemplatesWithDeduction {
       return 5;
     }
     template<class T> operator T() { return T{}; }
-    operator auto() { return &static_foo<int>; } 
+    operator auto() { return &static_foo<int>; }
   };
   struct N : M {
     using M::foo;
@@ -385,7 +385,7 @@ namespace MemberTemplatesWithDeduction {
     using M::static_foo;
     using M::operator auto;
   };
-  
+
   template <class T> int test() {
     int i = T{}.foo(3);
     T m = T{}.foo(M{});
@@ -400,7 +400,7 @@ namespace MemberTemplatesWithDeduction {
   }
   int Minst = test<M>();
   int Ninst = test<N>();
-  
+
 }
 }
 
@@ -421,6 +421,7 @@ namespace DecltypeAutoShouldNotBeADecltypeSpecifier {
   namespace Dtor {
     struct A {};
     void f(A a) { a.~decltype(auto)(); } // expected-error {{'decltype(auto)' not allowed here}}
+    void g(int i) { i.~decltype(auto)(); } // expected-error {{'decltype(auto)' not allowed here}}
   }
 
   namespace BaseClass {
@@ -450,11 +451,11 @@ namespace CurrentInstantiation {
     auto f(); // expected-note {{here}}
     int g() { return f(); } // expected-error {{cannot be used before it is defined}}
  #else
-    auto f(); 
-    int g() { return f(); } 
+    auto f();
+    int g() { return f(); }
  #endif
   };
- #ifndef DELAYED_TEMPLATE_PARSING 
+ #ifndef DELAYED_TEMPLATE_PARSING
   template int U<int>::g(); // expected-note {{in instantiation of}}
  #else
   template int U<int>::g();
@@ -617,6 +618,13 @@ namespace PR33222 {
   };
   template<> auto *B<char[1]>::q() { return (int*)0; }
   template<> auto B<char[2]>::q() { return (int*)0; } // expected-error {{return type}}
-  // FIXME: suppress this follow-on error: expected-error@-1 {{cannot initialize}}
   template<> int B<char[3]>::q() { return 0; } // expected-error {{return type}}
+}
+
+namespace PR46637 {
+  using A = auto () -> auto; // expected-error {{'auto' not allowed in type alias}}
+  using B = auto (*)() -> auto; // expected-error {{'auto' not allowed in type alias}}
+  template<auto (*)() -> auto> struct X {}; // expected-error {{'auto' not allowed in template parameter until C++17}}
+  template<typename T> struct Y { T x; };
+  Y<auto() -> auto> y; // expected-error {{'auto' not allowed in template argument}}
 }

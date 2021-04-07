@@ -168,7 +168,7 @@ class FpIf64<dag outs, dag ins, FPFormat fp, list<dag> pattern> :
              FpI_<outs, ins, fp, pattern>, Requires<[FPStackf64]>;
 
 // Factoring for arithmetic.
-multiclass FPBinary_rr<SDNode OpNode> {
+multiclass FPBinary_rr<SDPatternOperator OpNode> {
 // Register op register -> register
 // These are separated out because they have no reversed form.
 def _Fp32 : FpIf32<(outs RFP32:$dst), (ins RFP32:$src1, RFP32:$src2), TwoArgFP,
@@ -181,7 +181,7 @@ def _Fp80 : FpI_<(outs RFP80:$dst), (ins RFP80:$src1, RFP80:$src2), TwoArgFP,
 // The FopST0 series are not included here because of the irregularities
 // in where the 'r' goes in assembly output.
 // These instructions cannot address 80-bit memory.
-multiclass FPBinary<SDNode OpNode, Format fp, string asmstring,
+multiclass FPBinary<SDPatternOperator OpNode, Format fp, string asmstring,
                     bit Forward = 1> {
 // ST(0) = ST(0) + [mem]
 def _Fp32m  : FpIf32<(outs RFP32:$dst),
@@ -286,7 +286,7 @@ defm MUL : FPBinary_rr<any_fmul>;
 defm DIV : FPBinary_rr<any_fdiv>;
 }
 
-// Sets the scheduling resources for the actual NAME#_F<size>m defintions.
+// Sets the scheduling resources for the actual NAME#_F<size>m definitions.
 let SchedRW = [WriteFAddLd] in {
 defm ADD : FPBinary<any_fadd, MRM0m, "add">;
 defm SUB : FPBinary<any_fsub, MRM4m, "sub">;
@@ -343,7 +343,7 @@ def DIVR_FPrST0 : FPrST0PInst<MRM6r, "fdiv{|r}p\t{%st, $op|$op, st}">;
 } // SchedRW
 
 // Unary operations.
-multiclass FPUnary<SDNode OpNode, Format fp, string asmstring> {
+multiclass FPUnary<SDPatternOperator OpNode, Format fp, string asmstring> {
 def _Fp32  : FpIf32<(outs RFP32:$dst), (ins RFP32:$src), OneArgFPRW,
                  [(set RFP32:$dst, (OpNode RFP32:$src))]>;
 def _Fp64  : FpIf64<(outs RFP64:$dst), (ins RFP64:$src), OneArgFPRW,
@@ -375,7 +375,8 @@ def TST_F  : FPI<0xD9, MRM_E4, (outs), (ins), "ftst">;
 
 // Versions of FP instructions that take a single memory operand.  Added for the
 //   disassembler; remove as they are included with patterns elsewhere.
-let SchedRW = [WriteFComLd], Uses = [FPCW], mayRaiseFPException = 1 in {
+let SchedRW = [WriteFComLd], Uses = [FPCW], mayRaiseFPException = 1,
+    mayLoad = 1 in {
 def FCOM32m  : FPI<0xD8, MRM2m, (outs), (ins f32mem:$src), "fcom{s}\t$src">;
 def FCOMP32m : FPI<0xD8, MRM3m, (outs), (ins f32mem:$src), "fcomp{s}\t$src">;
 
@@ -390,21 +391,22 @@ def FICOMP32m: FPI<0xDA, MRM3m, (outs), (ins i32mem:$src), "ficomp{l}\t$src">;
 } // SchedRW
 
 let SchedRW = [WriteMicrocoded] in {
-let Defs = [FPSW, FPCW] in {
-def FLDENVm  : FPI<0xD9, MRM4m, (outs), (ins f32mem:$src), "fldenv\t$src">;
-def FRSTORm  : FPI<0xDD, MRM4m, (outs), (ins f32mem:$dst), "frstor\t$dst">;
+let Defs = [FPSW, FPCW], mayLoad = 1 in {
+def FLDENVm  : FPI<0xD9, MRM4m, (outs), (ins anymem:$src), "fldenv\t$src">;
+def FRSTORm  : FPI<0xDD, MRM4m, (outs), (ins anymem:$src), "frstor\t$src">;
 }
 
-let Defs = [FPSW, FPCW], Uses = [FPSW, FPCW] in {
-def FSTENVm  : FPI<0xD9, MRM6m, (outs), (ins f32mem:$dst), "fnstenv\t$dst">;
-def FSAVEm   : FPI<0xDD, MRM6m, (outs), (ins f32mem:$dst), "fnsave\t$dst">;
+let Defs = [FPSW, FPCW], Uses = [FPSW, FPCW], mayStore = 1 in {
+def FSTENVm  : FPI<0xD9, MRM6m, (outs), (ins anymem:$dst), "fnstenv\t$dst">;
+def FSAVEm   : FPI<0xDD, MRM6m, (outs), (ins anymem:$dst), "fnsave\t$dst">;
 }
 
-let Uses = [FPSW] in
+let Uses = [FPSW], mayStore = 1 in
 def FNSTSWm  : FPI<0xDD, MRM7m, (outs), (ins i16mem:$dst), "fnstsw\t$dst">;
 
+let mayLoad = 1 in
 def FBLDm    : FPI<0xDF, MRM4m, (outs), (ins f80mem:$src), "fbld\t$src">;
-let Uses = [FPCW] ,mayRaiseFPException = 1 in
+let Uses = [FPCW] ,mayRaiseFPException = 1, mayStore = 1 in
 def FBSTPm   : FPI<0xDF, MRM6m, (outs), (ins f80mem:$dst), "fbstp\t$dst">;
 } // SchedRW
 
@@ -748,20 +750,20 @@ def FCOMPP : I<0xDE, MRM_D9, (outs), (ins), "fcompp", []>;
 
 let Uses = [FPSW, FPCW] in {
 def FXSAVE : I<0xAE, MRM0m, (outs), (ins opaquemem:$dst),
-             "fxsave\t$dst", [(int_x86_fxsave addr:$dst)]>, TB,
+             "fxsave\t$dst", [(int_x86_fxsave addr:$dst)]>, PS,
              Requires<[HasFXSR]>;
 def FXSAVE64 : RI<0xAE, MRM0m, (outs), (ins opaquemem:$dst),
                "fxsave64\t$dst", [(int_x86_fxsave64 addr:$dst)]>,
-               TB, Requires<[HasFXSR, In64BitMode]>;
+               PS, Requires<[HasFXSR, In64BitMode]>;
 } // Uses = [FPSW, FPCW]
 
 let Defs = [FPSW, FPCW] in {
 def FXRSTOR : I<0xAE, MRM1m, (outs), (ins opaquemem:$src),
               "fxrstor\t$src", [(int_x86_fxrstor addr:$src)]>,
-              TB, Requires<[HasFXSR]>;
+              PS, Requires<[HasFXSR]>;
 def FXRSTOR64 : RI<0xAE, MRM1m, (outs), (ins opaquemem:$src),
                 "fxrstor64\t$src", [(int_x86_fxrstor64 addr:$src)]>,
-                TB, Requires<[HasFXSR, In64BitMode]>;
+                PS, Requires<[HasFXSR, In64BitMode]>;
 } // Defs = [FPSW, FPCW]
 } // SchedRW
 

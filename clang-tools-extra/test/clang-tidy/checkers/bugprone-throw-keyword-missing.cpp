@@ -94,11 +94,20 @@ void nameContainsExceptionThrownTest(int i) {
 template <class Exception>
 void f(int i, Exception excToBeThrown) {}
 
-void funcCallWithTempExcTest() {
-  f(5, RegularException());
+template <class SomeType>
+void templ(int i) {
+  if (i > 0)
+    SomeType();
 }
 
-// Global variable initilization test.
+void funcCallWithTempExcTest() {
+  f(5, RegularException());
+
+  templ<RegularException>(4);
+  templ<RegularClass>(4);
+}
+
+// Global variable initialization test.
 RegularException exc = RegularException();
 RegularException *excptr = new RegularException();
 

@@ -69,8 +69,9 @@ static const char KnownStringCompareFunctions[] = "__builtin_memcmp;"
 SuspiciousStringCompareCheck::SuspiciousStringCompareCheck(
     StringRef Name, ClangTidyContext *Context)
     : ClangTidyCheck(Name, Context),
-      WarnOnImplicitComparison(Options.get("WarnOnImplicitComparison", 1)),
-      WarnOnLogicalNotComparison(Options.get("WarnOnLogicalNotComparison", 0)),
+      WarnOnImplicitComparison(Options.get("WarnOnImplicitComparison", true)),
+      WarnOnLogicalNotComparison(
+          Options.get("WarnOnLogicalNotComparison", false)),
       StringCompareLikeFunctions(
           Options.get("StringCompareLikeFunctions", "")) {}
 
@@ -112,10 +113,8 @@ void SuspiciousStringCompareCheck::registerMatchers(MatchFinder *Finder) {
     // Detect suspicious calls to string compare:
     //     'if (strcmp())'  ->  'if (strcmp() != 0)'
     Finder->addMatcher(
-        stmt(anyOf(ifStmt(hasCondition(StringCompareCallExpr)),
-                   whileStmt(hasCondition(StringCompareCallExpr)),
-                   doStmt(hasCondition(StringCompareCallExpr)),
-                   forStmt(hasCondition(StringCompareCallExpr)),
+        stmt(anyOf(mapAnyOf(ifStmt, whileStmt, doStmt, forStmt)
+                       .with(hasCondition(StringCompareCallExpr)),
                    binaryOperator(hasAnyOperatorName("&&", "||"),
                                   hasEitherOperand(StringCompareCallExpr))))
             .bind("missing-comparison"),
@@ -134,9 +133,10 @@ void SuspiciousStringCompareCheck::registerMatchers(MatchFinder *Finder) {
 
   // Detect suspicious cast to an inconsistant type (i.e. not integer type).
   Finder->addMatcher(
-      implicitCastExpr(unless(hasType(isInteger())),
-                       hasSourceExpression(StringCompareCallExpr))
-          .bind("invalid-conversion"),
+      traverse(TK_AsIs,
+               implicitCastExpr(unless(hasType(isInteger())),
+                                hasSourceExpression(StringCompareCallExpr))
+                   .bind("invalid-conversion")),
       this);
 
   // Detect suspicious operator with string compare function as operand.
@@ -155,11 +155,11 @@ void SuspiciousStringCompareCheck::registerMatchers(MatchFinder *Finder) {
                 has(ignoringParenImpCasts(integerLiteral(unless(equals(0)))))),
             characterLiteral(), cxxBoolLiteral()));
 
-  Finder->addMatcher(binaryOperator(isComparisonOperator(),
-                                    hasEitherOperand(StringCompareCallExpr),
-                                    hasEitherOperand(InvalidLiteral))
-                         .bind("invalid-comparison"),
-                     this);
+  Finder->addMatcher(
+      binaryOperator(isComparisonOperator(),
+                     hasOperands(StringCompareCallExpr, InvalidLiteral))
+          .bind("invalid-comparison"),
+      this);
 }
 
 void SuspiciousStringCompareCheck::check(

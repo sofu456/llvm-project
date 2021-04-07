@@ -414,13 +414,14 @@ void SystemRuntimeMacOSX::ReadLibdispatchTSDIndexes() {
 #endif
 
     TypeSystemClang *ast_ctx =
-        TypeSystemClang::GetScratch(m_process->GetTarget());
+        ScratchTypeSystemClang::GetForTarget(m_process->GetTarget());
     if (m_dispatch_tsd_indexes_addr != LLDB_INVALID_ADDRESS) {
       CompilerType uint16 =
           ast_ctx->GetBuiltinTypeForEncodingAndBitSize(eEncodingUint, 16);
       CompilerType dispatch_tsd_indexes_s = ast_ctx->CreateRecordType(
-          nullptr, lldb::eAccessPublic, "__lldb_dispatch_tsd_indexes_s",
-          clang::TTK_Struct, lldb::eLanguageTypeC);
+          nullptr, OptionalClangModuleID(), lldb::eAccessPublic,
+          "__lldb_dispatch_tsd_indexes_s", clang::TTK_Struct,
+          lldb::eLanguageTypeC);
 
       TypeSystemClang::StartTagDeclarationDefinition(dispatch_tsd_indexes_s);
       TypeSystemClang::AddFieldToRecordType(dispatch_tsd_indexes_s,

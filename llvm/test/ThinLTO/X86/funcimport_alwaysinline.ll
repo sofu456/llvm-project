@@ -11,7 +11,7 @@
 
 ; foo() being always_inline should be imported irrespective of the
 ; instruction limit
-; CHECK1: define available_externally dso_local void @foo()
+; CHECK1: define available_externally void @foo()
 
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-unknown-linux-gnu"
@@ -23,4 +23,4 @@ entry:
 }
 
 attributes #0 = { alwaysinline nounwind uwtable }
-; CHECK2: ^2 = gv: (guid: {{.*}}, summaries: (function: (module: ^0, flags: (linkage: external, notEligibleToImport: 0, live: 1, dsoLocal: 1, canAutoHide: 0), insts: 1, funcFlags: (readNone: 0, readOnly: 0, noRecurse: 0, returnDoesNotAlias: 0, noInline: 0, alwaysInline: 1))))
+; CHECK2: ^2 = gv: (guid: {{.*}}, summaries: (function: (module: ^0, flags: (linkage: external, visibility: default, notEligibleToImport: 0, live: 1, dsoLocal: 1, canAutoHide: 0), insts: 1, funcFlags: (readNone: 0, readOnly: 0, noRecurse: 0, returnDoesNotAlias: 0, noInline: 0, alwaysInline: 1))))

@@ -60,10 +60,10 @@ class ExprDiagnosticsTestCase(TestBase):
         self.assertIn("<user expression 3>:1:10", value.GetError().GetCString())
 
         # Multiline top-level expressions.
-        value = frame.EvaluateExpression("void x() {}\nvoid foo(unknown_type x) {}", top_level_opts)
+        value = frame.EvaluateExpression("void x() {}\nvoid foo;", top_level_opts)
         self.assertFalse(value.GetError().Success())
-        self.assertIn("\nvoid foo(unknown_type x) {}\n         ^\n", value.GetError().GetCString())
-        self.assertIn("<user expression 4>:2:10", value.GetError().GetCString())
+        self.assertIn("\nvoid foo;\n     ^", value.GetError().GetCString())
+        self.assertIn("<user expression 4>:2:6", value.GetError().GetCString())
 
         # Test that we render Clang's 'notes' correctly.
         value = frame.EvaluateExpression("struct SFoo{}; struct SFoo { int x; };", top_level_opts)
@@ -88,7 +88,7 @@ class ExprDiagnosticsTestCase(TestBase):
         self.assertFalse(value.GetError().Success())
         self.assertIn("error: <user expression 9>:1:8: redefinition of 'Redef'\nstruct Redef { float y; };\n       ^\n<user expression 8>:1:8: previous definition is here\nstruct Redef { double x; };\n       ^", value.GetError().GetCString())
 
-    @skipUnlessDarwin
+    @add_test_categories(["objc"])
     def test_source_locations_from_objc_modules(self):
         self.build()
 

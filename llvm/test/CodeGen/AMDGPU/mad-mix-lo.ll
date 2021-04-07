@@ -1,5 +1,5 @@
 ; RUN: llc -march=amdgcn -mcpu=gfx900 -verify-machineinstrs -enable-misched=false < %s | FileCheck -enable-var-scope -check-prefixes=GCN,GFX9 %s
-; RUN: llc -march=amdgcn -mcpu=fiji -verify-machineinstrs -enable-misched=false < %s | FileCheck -enable-var-scope -check-prefixes=GCN,CIVI,VI %s
+; RUN: llc -march=amdgcn -mcpu=fiji -verify-machineinstrs -enable-misched=false < %s | FileCheck -enable-var-scope -check-prefixes=GCN,CIVI %s
 ; RUN: llc -march=amdgcn -mcpu=hawaii -verify-machineinstrs -enable-misched=false < %s | FileCheck -enable-var-scope -check-prefixes=GCN,CIVI,CI %s
 
 ; GCN-LABEL: mixlo_simple:
@@ -310,5 +310,5 @@ declare <2 x float> @llvm.fmuladd.v2f32(<2 x float>, <2 x float>, <2 x float>) #
 declare <3 x float> @llvm.fmuladd.v3f32(<3 x float>, <3 x float>, <3 x float>) #1
 declare <4 x float> @llvm.fmuladd.v4f32(<4 x float>, <4 x float>, <4 x float>) #1
 
-attributes #0 = { nounwind }
+attributes #0 = { nounwind "denormal-fp-math-f32"="preserve-sign,preserve-sign" }
 attributes #1 = { nounwind readnone speculatable }

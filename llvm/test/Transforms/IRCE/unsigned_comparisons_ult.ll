@@ -16,7 +16,7 @@ define void @test_01(i32* %arr, i32* %a_len_ptr) #0 {
 
 ; CHECK:      test_01
 ; CHECK:        entry:
-; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, !range !0
+; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, align 4, !range !0
 ; CHECK-NEXT:     [[COND:%[^ ]+]] = icmp ult i32 0, %exit.mainloop.at
 ; CHECK-NEXT:     br i1 [[COND]], label %loop.preheader, label %main.pseudo.exit
 ; CHECK:        loop:
@@ -59,9 +59,8 @@ define void @test_02(i32* %arr, i32* %a_len_ptr) #0 {
 
 ; CHECK: test_02(
 ; CHECK:        entry:
-; CHECK-NEXT:     %len = load i32, i32* %a_len_ptr, !range !0
-; CHECK-NEXT:     [[COND1:%[^ ]+]] = icmp ugt i32 %len, 1
-; CHECK-NEXT:     [[UMIN:%[^ ]+]] = select i1 [[COND1]], i32 %len, i32 1
+; CHECK-NEXT:     %len = load i32, i32* %a_len_ptr, align 4, !range !0
+; CHECK-NEXT:     [[UMIN:%[^ ]+]] = call i32 @llvm.umax.i32(i32 %len, i32 1)
 ; CHECK-NEXT:     %exit.preloop.at = add nsw i32 [[UMIN]], -1
 ; CHECK-NEXT:     [[COND2:%[^ ]+]] = icmp ugt i32 100, %exit.preloop.at
 ; CHECK-NEXT:     br i1 [[COND2]], label %loop.preloop.preheader, label %preloop.pseudo.exit
@@ -107,7 +106,7 @@ define void @test_03(i32* %arr, i32* %a_len_ptr) #0 {
 
 ; CHECK:      test_03
 ; CHECK:        entry:
-; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, !range !0
+; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, align 4, !range !0
 ; CHECK-NEXT:     [[COND:%[^ ]+]] = icmp ult i32 0, %exit.mainloop.at
 ; CHECK-NEXT:     br i1 [[COND]], label %loop.preheader, label %main.pseudo.exit
 ; CHECK:        loop:
@@ -150,7 +149,7 @@ define void @test_04(i32* %arr, i32* %a_len_ptr) #0 {
 
 ; CHECK:      test_04
 ; CHECK:        entry:
-; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, !range !0
+; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, align 4, !range !0
 ; CHECK-NEXT:     [[COND:%[^ ]+]] = icmp ult i32 0, %exit.mainloop.at
 ; CHECK-NEXT:     br i1 [[COND]], label %loop.preheader, label %main.pseudo.exit
 ; CHECK:        loop:
@@ -192,9 +191,8 @@ exit:
 define void @test_05(i32* %arr, i32* %a_len_ptr) #0 {
 ; CHECK: test_05(
 ; CHECK:        entry:
-; CHECK-NEXT:     %len = load i32, i32* %a_len_ptr, !range !0
-; CHECK-NEXT:     [[COND1:%[^ ]+]] = icmp ugt i32 %len, 1
-; CHECK-NEXT:     [[UMIN:%[^ ]+]] = select i1 [[COND1]], i32 %len, i32 1
+; CHECK-NEXT:     %len = load i32, i32* %a_len_ptr, align 4, !range !0
+; CHECK-NEXT:     [[UMIN:%[^ ]+]] = call i32 @llvm.umax.i32(i32 %len, i32 1)
 ; CHECK-NEXT:     %exit.preloop.at = add nsw i32 [[UMIN]], -1
 ; CHECK-NEXT:     [[COND2:%[^ ]+]] = icmp ugt i32 -2147483648, %exit.preloop.at
 ; CHECK-NEXT:     br i1 [[COND2]], label %loop.preloop.preheader, label %preloop.pseudo.exit
@@ -240,7 +238,7 @@ define void @test_06(i32* %arr, i32* %a_len_ptr) #0 {
 
 ; CHECK:      test_06
 ; CHECK:        entry:
-; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, !range !0
+; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, align 4, !range !0
 ; CHECK-NEXT:     [[COND:%[^ ]+]] = icmp ult i32 0, %exit.mainloop.at
 ; CHECK-NEXT:     br i1 [[COND]], label %loop.preheader, label %main.pseudo.exit
 ; CHECK:        loop:
@@ -316,7 +314,7 @@ define void @test_08(i32* %arr, i32* %a_len_ptr) #0 {
 
 ; CHECK:      test_08
 ; CHECK:        entry:
-; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, !range !0
+; CHECK-NEXT:     %exit.mainloop.at = load i32, i32* %a_len_ptr, align 4, !range !0
 ; CHECK-NEXT:     [[COND:%[^ ]+]] = icmp ult i32 0, %exit.mainloop.at
 ; CHECK-NEXT:     br i1 [[COND]], label %loop.preheader, label %main.pseudo.exit
 ; CHECK:        loop:

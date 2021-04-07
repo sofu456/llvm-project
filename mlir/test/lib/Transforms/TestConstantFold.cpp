@@ -9,7 +9,7 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/StandardOps/IR/Ops.h"
 #include "mlir/IR/Builders.h"
-#include "mlir/IR/Function.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/FoldUtils.h"
 #include "mlir/Transforms/Passes.h"
@@ -19,7 +19,7 @@ using namespace mlir;
 
 namespace {
 /// Simple constant folding pass.
-struct TestConstantFold : public FunctionPass<TestConstantFold> {
+struct TestConstantFold : public PassWrapper<TestConstantFold, FunctionPass> {
   // All constants in the function post folding.
   SmallVector<Operation *, 8> existingConstants;
 
@@ -65,8 +65,10 @@ void TestConstantFold::runOnFunction() {
 }
 
 namespace mlir {
+namespace test {
 void registerTestConstantFold() {
   PassRegistration<TestConstantFold>("test-constant-fold",
                                      "Test operation constant folding");
 }
+} // namespace test
 } // namespace mlir

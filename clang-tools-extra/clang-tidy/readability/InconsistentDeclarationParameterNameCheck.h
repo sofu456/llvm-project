@@ -27,12 +27,15 @@ public:
   InconsistentDeclarationParameterNameCheck(StringRef Name,
                                             ClangTidyContext *Context)
       : ClangTidyCheck(Name, Context),
-        IgnoreMacros(Options.getLocalOrGlobal("IgnoreMacros", 1) != 0),
-        Strict(Options.getLocalOrGlobal("Strict", 0) != 0) {}
+        IgnoreMacros(Options.getLocalOrGlobal("IgnoreMacros", true)),
+        Strict(Options.getLocalOrGlobal("Strict", false)) {}
 
   void storeOptions(ClangTidyOptions::OptionMap &Opts) override;
   void registerMatchers(ast_matchers::MatchFinder *Finder) override;
   void check(const ast_matchers::MatchFinder::MatchResult &Result) override;
+  llvm::Optional<TraversalKind> getCheckTraversalKind() const override {
+    return TK_IgnoreUnlessSpelledInSource;
+  }
 
 private:
   void markRedeclarationsAsVisited(const FunctionDecl *FunctionDeclaration);

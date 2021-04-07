@@ -292,23 +292,14 @@ void CommandObjectExpression::HandleCompletion(CompletionRequest &request) {
   options.SetAutoApplyFixIts(false);
   options.SetGenerateDebugInfo(false);
 
-  // We need a valid execution context with a frame pointer for this
-  // completion, so if we don't have one we should try to make a valid
-  // execution context.
-  if (m_interpreter.GetExecutionContext().GetFramePtr() == nullptr)
-    m_interpreter.UpdateExecutionContext(nullptr);
-
-  // This didn't work, so let's get out before we start doing things that
-  // expect a valid frame pointer.
-  if (m_interpreter.GetExecutionContext().GetFramePtr() == nullptr)
-    return;
-
   ExecutionContext exe_ctx(m_interpreter.GetExecutionContext());
 
-  Target *target = exe_ctx.GetTargetPtr();
+  // Get out before we start doing things that expect a valid frame pointer.
+  if (exe_ctx.GetFramePtr() == nullptr)
+    return;
 
-  if (!target)
-    target = &GetDummyTarget();
+  Target *exe_target = exe_ctx.GetTargetPtr();
+  Target &target = exe_target ? *exe_target : GetDummyTarget();
 
   unsigned cursor_pos = request.GetRawCursorPos();
   // Get the full user input including the suffix. The suffix is necessary
@@ -342,7 +333,7 @@ void CommandObjectExpression::HandleCompletion(CompletionRequest &request) {
   auto language = exe_ctx.GetFrameRef().GetLanguage();
 
   Status error;
-  lldb::UserExpressionSP expr(target->GetUserExpressionForLanguage(
+  lldb::UserExpressionSP expr(target.GetUserExpressionForLanguage(
       code, llvm::StringRef(), language, UserExpression::eResultTypeAny,
       options, nullptr, error));
   if (error.Fail())
@@ -385,6 +376,7 @@ CommandObjectExpression::GetEvalOptions(const Target &target) {
     auto_apply_fixits = m_command_options.auto_apply_fixits == eLazyBoolYes;
 
   options.SetAutoApplyFixIts(auto_apply_fixits);
+  options.SetRetriesWithFixIts(target.GetNumberOfRetriesWithFixits());
 
   if (m_command_options.top_level)
     options.SetExecutionPolicy(eExecutionPolicyTopLevel);
@@ -410,22 +402,19 @@ bool CommandObjectExpression::EvaluateExpression(llvm::StringRef expr,
   // command object DoExecute has finished when doing multi-line expression
   // that use an input reader...
   ExecutionContext exe_ctx(m_interpreter.GetExecutionContext());
-
-  Target *target = exe_ctx.GetTargetPtr();
-
-  if (!target)
-    target = &GetDummyTarget();
+  Target *exe_target = exe_ctx.GetTargetPtr();
+  Target &target = exe_target ? *exe_target : GetDummyTarget();
 
   lldb::ValueObjectSP result_valobj_sp;
   StackFrame *frame = exe_ctx.GetFramePtr();
 
-  const EvaluateExpressionOptions options = GetEvalOptions(*target);
-  ExpressionResults success = target->EvaluateExpression(
+  const EvaluateExpressionOptions options = GetEvalOptions(target);
+  ExpressionResults success = target.EvaluateExpression(
       expr, frame, result_valobj_sp, options, &m_fixed_expression);
 
   // We only tell you about the FixIt if we applied it.  The compiler errors
   // will suggest the FixIt if it parsed.
-  if (!m_fixed_expression.empty() && target->GetEnableNotifyAboutFixIts()) {
+  if (!m_fixed_expression.empty() && target.GetEnableNotifyAboutFixIts()) {
     if (success == eExpressionCompleted)
       error_stream.Printf("  Fix-it applied, fixed expression was: \n    %s\n",
                           m_fixed_expression.c_str());
@@ -499,7 +488,8 @@ void CommandObjectExpression::IOHandlerInputComplete(IOHandler &io_handler,
   StreamFileSP output_sp = io_handler.GetOutputStreamFileSP();
   StreamFileSP error_sp = io_handler.GetErrorStreamFileSP();
 
-  CommandReturnObject return_obj;
+  CommandReturnObject return_obj(
+      GetCommandInterpreter().GetDebugger().GetUseColor());
   EvaluateExpression(line.c_str(), *output_sp, *error_sp, return_obj);
   if (output_sp)
     output_sp->Flush();

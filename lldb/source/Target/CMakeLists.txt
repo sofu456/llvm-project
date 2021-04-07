@@ -24,6 +24,7 @@ add_lldb_library(lldbTarget
   PathMappingList.cpp
   Platform.cpp
   Process.cpp
+  ProcessTrace.cpp
   Queue.cpp
   QueueItem.cpp
   QueueList.cpp
@@ -63,7 +64,11 @@ add_lldb_library(lldbTarget
   ThreadPlanStepThrough.cpp
   ThreadPlanStepUntil.cpp
   ThreadPlanTracer.cpp
+  ThreadPlanStack.cpp
   ThreadSpec.cpp
+  ThreadPostMortemTrace.cpp
+  Trace.cpp
+  TraceSessionFileParser.cpp
   UnixSignals.cpp
   UnwindAssembly.cpp
   UnwindLLDB.cpp

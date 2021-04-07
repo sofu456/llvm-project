@@ -22,15 +22,15 @@ using namespace mlir;
 
 /// Given an operation, find the parent region that folded constants should be
 /// inserted into.
-static Region *getInsertionRegion(
-    DialectInterfaceCollection<OpFolderDialectInterface> &interfaces,
-    Block *insertionBlock) {
+static Region *
+getInsertionRegion(DialectInterfaceCollection<DialectFoldInterface> &interfaces,
+                   Block *insertionBlock) {
   while (Region *region = insertionBlock->getParent()) {
     // Insert in this region for any of the following scenarios:
     //  * The parent is unregistered, or is known to be isolated from above.
     //  * The parent is a top-level operation.
     auto *parentOp = region->getParentOp();
-    if (!parentOp->isRegistered() || parentOp->isKnownIsolatedFromAbove() ||
+    if (parentOp->mightHaveTrait<OpTrait::IsIsolatedFromAbove>() ||
         !parentOp->getBlock())
       return region;
 
@@ -61,6 +61,18 @@ static Operation *materializeConstant(Dialect *dialect, OpBuilder &builder,
     return constOp;
   }
 
+  // TODO: To facilitate splitting the std dialect (PR48490), have a special
+  // case for falling back to std.constant. Eventually, we will have separate
+  // ops tensor.constant, int.constant, float.constant, etc. that live in their
+  // respective dialects, which will allow each dialect to implement the
+  // materializeConstant hook above.
+  //
+  // The special case is needed because in the interim state while we are
+  // splitting out those dialects from std, the std dialect depends on the
+  // tensor dialect, which makes it impossible for the tensor dialect to use
+  // std.constant (it would be a cyclic dependency) as part of its
+  // materializeConstant hook.
+  //
   // If the dialect is unable to materialize a constant, check to see if the
   // standard constant can be used.
   if (ConstantOp::isBuildableWith(value, type))
@@ -74,7 +86,10 @@ static Operation *materializeConstant(Dialect *dialect, OpBuilder &builder,
 
 LogicalResult OperationFolder::tryToFold(
     Operation *op, function_ref<void(Operation *)> processGeneratedConstants,
-    function_ref<void(Operation *)> preReplaceAction) {
+    function_ref<void(Operation *)> preReplaceAction, bool *inPlaceUpdate) {
+  if (inPlaceUpdate)
+    *inPlaceUpdate = false;
+
   // If this is a unique'd constant, return failure as we know that it has
   // already been folded.
   if (referencedDialects.count(op))
@@ -87,8 +102,11 @@ LogicalResult OperationFolder::tryToFold(
     return failure();
 
   // Check to see if the operation was just updated in place.
-  if (results.empty())
+  if (results.empty()) {
+    if (inPlaceUpdate)
+      *inPlaceUpdate = true;
     return success();
+  }
 
   // Constant folding succeeded. We will start replacing this op's uses and
   // erase this op. Invoke the callback provided by the caller to perform any
@@ -134,6 +152,27 @@ void OperationFolder::clear() {
   referencedDialects.clear();
 }
 
+/// Get or create a constant using the given builder. On success this returns
+/// the constant operation, nullptr otherwise.
+Value OperationFolder::getOrCreateConstant(OpBuilder &builder, Dialect *dialect,
+                                           Attribute value, Type type,
+                                           Location loc) {
+  OpBuilder::InsertionGuard foldGuard(builder);
+
+  // Use the builder insertion block to find an insertion point for the
+  // constant.
+  auto *insertRegion =
+      getInsertionRegion(interfaces, builder.getInsertionBlock());
+  auto &entry = insertRegion->front();
+  builder.setInsertionPoint(&entry, entry.begin());
+
+  // Get the constant map for the insertion region of this operation.
+  auto &uniquedConstants = foldScopes[insertRegion];
+  Operation *constOp = tryGetOrCreateConstant(uniquedConstants, dialect,
+                                              builder, value, type, loc);
+  return constOp ? constOp->getResult(0) : Value();
+}
+
 /// Tries to perform folding on the given `op`. If successful, populates
 /// `results` with the results of the folding.
 LogicalResult OperationFolder::tryToFold(
@@ -143,7 +182,7 @@ LogicalResult OperationFolder::tryToFold(
   SmallVector<OpFoldResult, 8> foldResults;
 
   // If this is a commutative operation, move constants to be trailing operands.
-  if (op->getNumOperands() >= 2 && op->isCommutative()) {
+  if (op->getNumOperands() >= 2 && op->hasTrait<OpTrait::IsCommutative>()) {
     std::stable_partition(
         op->getOpOperands().begin(), op->getOpOperands().end(),
         [&](OpOperand &O) { return !matchPattern(O.get(), m_Constant()); });
@@ -182,6 +221,8 @@ LogicalResult OperationFolder::tryToFold(
 
     // Check if the result was an SSA value.
     if (auto repl = foldResults[i].dyn_cast<Value>()) {
+      if (repl.getType() != op->getResult(i).getType())
+        return failure();
       results.emplace_back(repl);
       continue;
     }

@@ -1,29 +1,35 @@
-set(LLVM_TARGET_DEFINITIONS CallInterfaces.td)
-mlir_tablegen(CallInterfaces.h.inc -gen-op-interface-decls)
-mlir_tablegen(CallInterfaces.cpp.inc -gen-op-interface-defs)
-add_public_tablegen_target(MLIRCallInterfacesIncGen)
+add_mlir_interface(CallInterfaces)
+add_mlir_interface(CastInterfaces)
+add_mlir_interface(ControlFlowInterfaces)
+add_mlir_interface(CopyOpInterface)
+add_mlir_interface(DerivedAttributeOpInterface)
+add_mlir_interface(InferTypeOpInterface)
+add_mlir_interface(LoopLikeInterface)
+add_mlir_interface(SideEffectInterfaces)
+add_mlir_interface(VectorInterfaces)
+add_mlir_interface(ViewLikeInterface)
 
-set(LLVM_TARGET_DEFINITIONS ControlFlowInterfaces.td)
-mlir_tablegen(ControlFlowInterfaces.h.inc -gen-op-interface-decls)
-mlir_tablegen(ControlFlowInterfaces.cpp.inc -gen-op-interface-defs)
-add_public_tablegen_target(MLIRControlFlowInterfacesIncGen)
+set(LLVM_TARGET_DEFINITIONS DataLayoutInterfaces.td)
+mlir_tablegen(DataLayoutAttrInterface.h.inc -gen-attr-interface-decls)
+mlir_tablegen(DataLayoutAttrInterface.cpp.inc -gen-attr-interface-defs)
+mlir_tablegen(DataLayoutOpInterface.h.inc -gen-op-interface-decls)
+mlir_tablegen(DataLayoutOpInterface.cpp.inc -gen-op-interface-defs)
+mlir_tablegen(DataLayoutTypeInterface.h.inc -gen-type-interface-decls)
+mlir_tablegen(DataLayoutTypeInterface.cpp.inc -gen-type-interface-defs)
+add_public_tablegen_target(MLIRDataLayoutInterfacesIncGen)
+add_dependencies(mlir-generic-headers MLIRDataLayoutInterfacesIncGen)
 
-set(LLVM_TARGET_DEFINITIONS DerivedAttributeOpInterface.td)
-mlir_tablegen(DerivedAttributeOpInterface.h.inc -gen-op-interface-decls)
-mlir_tablegen(DerivedAttributeOpInterface.cpp.inc -gen-op-interface-defs)
-add_public_tablegen_target(MLIRDerivedAttributeOpInterfaceIncGen)
+add_mlir_doc(DataLayoutInterfaces
+  -gen-attr-interface-docs
+  DataLayoutAttrInterface
+  Interfaces/)
 
-set(LLVM_TARGET_DEFINITIONS InferTypeOpInterface.td)
-mlir_tablegen(InferTypeOpInterface.h.inc -gen-op-interface-decls)
-mlir_tablegen(InferTypeOpInterface.cpp.inc -gen-op-interface-defs)
-add_public_tablegen_target(MLIRInferTypeOpInterfaceIncGen)
+add_mlir_doc(DataLayoutInterfaces
+  -gen-type-interface-docs
+  DataLayoutTypeInterface
+  Interfaces/)
 
-set(LLVM_TARGET_DEFINITIONS LoopLikeInterface.td)
-mlir_tablegen(LoopLikeInterface.h.inc -gen-op-interface-decls)
-mlir_tablegen(LoopLikeInterface.cpp.inc -gen-op-interface-defs)
-add_public_tablegen_target(MLIRLoopLikeInterfaceIncGen)
-
-set(LLVM_TARGET_DEFINITIONS SideEffects.td)
-mlir_tablegen(SideEffectInterfaces.h.inc -gen-op-interface-decls)
-mlir_tablegen(SideEffectInterfaces.cpp.inc -gen-op-interface-defs)
-add_public_tablegen_target(MLIRSideEffectOpInterfacesIncGen)
+add_mlir_doc(DataLayoutInterfaces
+  -gen-op-interface-docs
+  DataLayoutOpInterface
+  Interfaces/)

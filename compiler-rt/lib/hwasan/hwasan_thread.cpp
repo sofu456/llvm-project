@@ -90,6 +90,12 @@ void Thread::Destroy() {
   if (heap_allocations_)
     heap_allocations_->Delete();
   DTLS_Destroy();
+  // Unregister this as the current thread.
+  // Instrumented code can not run on this thread from this point onwards, but
+  // malloc/free can still be served. Glibc may call free() very late, after all
+  // TSD destructors are done.
+  CHECK_EQ(GetCurrentThread(), this);
+  *GetCurrentThreadLongPtr() = 0;
 }
 
 void Thread::Print(const char *Prefix) {
@@ -107,18 +113,21 @@ static u32 xorshift(u32 state) {
 }
 
 // Generate a (pseudo-)random non-zero tag.
-tag_t Thread::GenerateRandomTag() {
+tag_t Thread::GenerateRandomTag(uptr num_bits) {
+  DCHECK_GT(num_bits, 0);
   if (tagging_disabled_) return 0;
   tag_t tag;
+  const uptr tag_mask = (1ULL << num_bits) - 1;
   do {
     if (flags()->random_tags) {
       if (!random_buffer_)
         random_buffer_ = random_state_ = xorshift(random_state_);
       CHECK(random_buffer_);
-      tag = random_buffer_ & 0xFF;
-      random_buffer_ >>= 8;
+      tag = random_buffer_ & tag_mask;
+      random_buffer_ >>= num_bits;
     } else {
-      tag = random_state_ = (random_state_ + 1) & 0xFF;
+      random_state_ += 1;
+      tag = random_state_ & tag_mask;
     }
   } while (!tag);
   return tag;

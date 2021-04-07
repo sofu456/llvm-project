@@ -338,18 +338,16 @@ bool llvm::stripDebugInfo(Function &F) {
         Changed = true;
         I.setDebugLoc(DebugLoc());
       }
-    }
-
-    auto *TermInst = BB.getTerminator();
-    if (!TermInst)
-      // This is invalid IR, but we may not have run the verifier yet
-      continue;
-    if (auto *LoopID = TermInst->getMetadata(LLVMContext::MD_loop)) {
-      auto *NewLoopID = LoopIDsMap.lookup(LoopID);
-      if (!NewLoopID)
-        NewLoopID = LoopIDsMap[LoopID] = stripDebugLocFromLoopID(LoopID);
-      if (NewLoopID != LoopID)
-        TermInst->setMetadata(LLVMContext::MD_loop, NewLoopID);
+      if (auto *LoopID = I.getMetadata(LLVMContext::MD_loop)) {
+        auto *NewLoopID = LoopIDsMap.lookup(LoopID);
+        if (!NewLoopID)
+          NewLoopID = LoopIDsMap[LoopID] = stripDebugLocFromLoopID(LoopID);
+        if (NewLoopID != LoopID)
+          I.setMetadata(LLVMContext::MD_loop, NewLoopID);
+      }
+      // Strip heapallocsite attachments, they point into the DIType system.
+      if (I.hasMetadataOtherThanDebugLoc())
+        I.setMetadata("heapallocsite", nullptr);
     }
   }
   return Changed;
@@ -358,16 +356,12 @@ bool llvm::stripDebugInfo(Function &F) {
 bool llvm::StripDebugInfo(Module &M) {
   bool Changed = false;
 
-  for (Module::named_metadata_iterator NMI = M.named_metadata_begin(),
-         NME = M.named_metadata_end(); NMI != NME;) {
-    NamedMDNode *NMD = &*NMI;
-    ++NMI;
-
+  for (NamedMDNode &NMD : llvm::make_early_inc_range(M.named_metadata())) {
     // We're stripping debug info, and without them, coverage information
     // doesn't quite make sense.
-    if (NMD->getName().startswith("llvm.dbg.") ||
-        NMD->getName() == "llvm.gcov") {
-      NMD->eraseFromParent();
+    if (NMD.getName().startswith("llvm.dbg.") ||
+        NMD.getName() == "llvm.gcov") {
+      NMD.eraseFromParent();
       Changed = true;
     }
   }
@@ -606,7 +600,9 @@ bool llvm::stripNonLineTableDebugInfo(Module &M) {
       Changed = true;
     }
   };
+  RemoveUses("llvm.dbg.addr");
   RemoveUses("llvm.dbg.declare");
+  RemoveUses("llvm.dbg.label");
   RemoveUses("llvm.dbg.value");
 
   // Delete non-CU debug info named metadata nodes.
@@ -645,26 +641,26 @@ bool llvm::stripNonLineTableDebugInfo(Module &M) {
     }
     for (auto &BB : F) {
       for (auto &I : BB) {
-        auto remapDebugLoc = [&](DebugLoc DL) -> DebugLoc {
+        auto remapDebugLoc = [&](const DebugLoc &DL) -> DebugLoc {
           auto *Scope = DL.getScope();
           MDNode *InlinedAt = DL.getInlinedAt();
           Scope = remap(Scope);
           InlinedAt = remap(InlinedAt);
-          return DebugLoc::get(DL.getLine(), DL.getCol(), Scope, InlinedAt);
+          return DILocation::get(M.getContext(), DL.getLine(), DL.getCol(),
+                                 Scope, InlinedAt);
         };
 
         if (I.getDebugLoc() != DebugLoc())
           I.setDebugLoc(remapDebugLoc(I.getDebugLoc()));
 
-        // Remap DILocations in untyped MDNodes (e.g., llvm.loop).
-        SmallVector<std::pair<unsigned, MDNode *>, 2> MDs;
-        I.getAllMetadata(MDs);
-        for (auto Attachment : MDs)
-          if (auto *T = dyn_cast_or_null<MDTuple>(Attachment.second))
-            for (unsigned N = 0; N < T->getNumOperands(); ++N)
-              if (auto *Loc = dyn_cast_or_null<DILocation>(T->getOperand(N)))
-                if (Loc != DebugLoc())
-                  T->replaceOperandWith(N, remapDebugLoc(Loc));
+        // Remap DILocations in llvm.loop attachments.
+        updateLoopMetadataDebugLocations(I, [&](const DILocation &Loc) {
+          return remapDebugLoc(&Loc).get();
+        });
+
+        // Strip heapallocsite attachments, they point into the DIType system.
+        if (I.hasMetadataOtherThanDebugLoc())
+          I.setMetadata("heapallocsite", nullptr);
       }
     }
   }
@@ -697,6 +693,38 @@ unsigned llvm::getDebugMetadataVersionFromModule(const Module &M) {
 void Instruction::applyMergedLocation(const DILocation *LocA,
                                       const DILocation *LocB) {
   setDebugLoc(DILocation::getMergedLocation(LocA, LocB));
+}
+
+void Instruction::updateLocationAfterHoist() { dropLocation(); }
+
+void Instruction::dropLocation() {
+  const DebugLoc &DL = getDebugLoc();
+  if (!DL)
+    return;
+
+  // If this isn't a call, drop the location to allow a location from a
+  // preceding instruction to propagate.
+  if (!isa<CallBase>(this)) {
+    setDebugLoc(DebugLoc());
+    return;
+  }
+
+  // Set a line 0 location for calls to preserve scope information in case
+  // inlining occurs.
+  DISubprogram *SP = getFunction()->getSubprogram();
+  if (SP)
+    // If a function scope is available, set it on the line 0 location. When
+    // hoisting a call to a predecessor block, using the function scope avoids
+    // making it look like the callee was reached earlier than it should be.
+    setDebugLoc(DILocation::get(getContext(), 0, 0, SP));
+  else
+    // The parent function has no scope. Go ahead and drop the location. If
+    // the parent function is inlined, and the callee has a subprogram, the
+    // inliner will attach a location to the call.
+    //
+    // One alternative is to set a line 0 location with the existing scope and
+    // inlinedAt info. The location might be sensitive to when inlining occurs.
+    setDebugLoc(DebugLoc());
 }
 
 //===----------------------------------------------------------------------===//

@@ -6,10 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Dialect/SPIRV/SPIRVLowering.h"
-#include "mlir/Dialect/SPIRV/SPIRVOps.h"
-#include "mlir/Dialect/SPIRV/SPIRVTypes.h"
-#include "mlir/IR/Function.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVTypes.h"
+#include "mlir/Dialect/SPIRV/Transforms/SPIRVConversion.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 
 using namespace mlir;
@@ -20,7 +20,8 @@ using namespace mlir;
 
 namespace {
 /// A pass for testing SPIR-V op availability.
-struct PrintOpAvailability : public FunctionPass<PrintOpAvailability> {
+struct PrintOpAvailability
+    : public PassWrapper<PrintOpAvailability, FunctionPass> {
   void runOnFunction() override;
 };
 } // end anonymous namespace
@@ -29,9 +30,9 @@ void PrintOpAvailability::runOnFunction() {
   auto f = getFunction();
   llvm::outs() << f.getName() << "\n";
 
-  Dialect *spvDialect = getContext().getRegisteredDialect("spv");
+  Dialect *spvDialect = getContext().getLoadedDialect("spv");
 
-  f.getOperation()->walk([&](Operation *op) {
+  f->walk([&](Operation *op) {
     if (op->getDialect() != spvDialect)
       return WalkResult::advance();
 
@@ -50,7 +51,7 @@ void PrintOpAvailability::runOnFunction() {
       os << opName << " extensions: [";
       for (const auto &exts : extension.getExtensions()) {
         os << " [";
-        interleaveComma(exts, os, [&](spirv::Extension ext) {
+        llvm::interleaveComma(exts, os, [&](spirv::Extension ext) {
           os << spirv::stringifyExtension(ext);
         });
         os << "]";
@@ -62,7 +63,7 @@ void PrintOpAvailability::runOnFunction() {
       os << opName << " capabilities: [";
       for (const auto &caps : capability.getCapabilities()) {
         os << " [";
-        interleaveComma(caps, os, [&](spirv::Capability cap) {
+        llvm::interleaveComma(caps, os, [&](spirv::Capability cap) {
           os << spirv::stringifyCapability(cap);
         });
         os << "]";
@@ -88,7 +89,8 @@ void registerPrintOpAvailabilityPass() {
 
 namespace {
 /// A pass for testing SPIR-V op availability.
-struct ConvertToTargetEnv : public FunctionPass<ConvertToTargetEnv> {
+struct ConvertToTargetEnv
+    : public PassWrapper<ConvertToTargetEnv, FunctionPass> {
   void runOnFunction() override;
 };
 
@@ -135,20 +137,20 @@ void ConvertToTargetEnv::runOnFunction() {
     return signalPassFailure();
   }
 
-  auto target = spirv::SPIRVConversionTarget::get(targetEnv);
+  auto target = SPIRVConversionTarget::get(targetEnv);
 
-  OwningRewritePatternList patterns;
-  patterns.insert<ConvertToAtomCmpExchangeWeak, ConvertToBitReverse,
-                  ConvertToGroupNonUniformBallot, ConvertToModule,
-                  ConvertToSubgroupBallot>(context);
+  RewritePatternSet patterns(context);
+  patterns.add<ConvertToAtomCmpExchangeWeak, ConvertToBitReverse,
+               ConvertToGroupNonUniformBallot, ConvertToModule,
+               ConvertToSubgroupBallot>(context);
 
-  if (failed(applyPartialConversion(fn, *target, patterns)))
+  if (failed(applyPartialConversion(fn, *target, std::move(patterns))))
     return signalPassFailure();
 }
 
 ConvertToAtomCmpExchangeWeak::ConvertToAtomCmpExchangeWeak(MLIRContext *context)
-    : RewritePattern("test.convert_to_atomic_compare_exchange_weak_op",
-                     {"spv.AtomicCompareExchangeWeak"}, 1, context) {}
+    : RewritePattern("test.convert_to_atomic_compare_exchange_weak_op", 1,
+                     context, {"spv.AtomicCompareExchangeWeak"}) {}
 
 LogicalResult
 ConvertToAtomCmpExchangeWeak::matchAndRewrite(Operation *op,
@@ -168,8 +170,8 @@ ConvertToAtomCmpExchangeWeak::matchAndRewrite(Operation *op,
 }
 
 ConvertToBitReverse::ConvertToBitReverse(MLIRContext *context)
-    : RewritePattern("test.convert_to_bit_reverse_op", {"spv.BitReverse"}, 1,
-                     context) {}
+    : RewritePattern("test.convert_to_bit_reverse_op", 1, context,
+                     {"spv.BitReverse"}) {}
 
 LogicalResult
 ConvertToBitReverse::matchAndRewrite(Operation *op,
@@ -183,8 +185,8 @@ ConvertToBitReverse::matchAndRewrite(Operation *op,
 
 ConvertToGroupNonUniformBallot::ConvertToGroupNonUniformBallot(
     MLIRContext *context)
-    : RewritePattern("test.convert_to_group_non_uniform_ballot_op",
-                     {"spv.GroupNonUniformBallot"}, 1, context) {}
+    : RewritePattern("test.convert_to_group_non_uniform_ballot_op", 1, context,
+                     {"spv.GroupNonUniformBallot"}) {}
 
 LogicalResult ConvertToGroupNonUniformBallot::matchAndRewrite(
     Operation *op, PatternRewriter &rewriter) const {
@@ -196,7 +198,7 @@ LogicalResult ConvertToGroupNonUniformBallot::matchAndRewrite(
 }
 
 ConvertToModule::ConvertToModule(MLIRContext *context)
-    : RewritePattern("test.convert_to_module_op", {"spv.module"}, 1, context) {}
+    : RewritePattern("test.convert_to_module_op", 1, context, {"spv.module"}) {}
 
 LogicalResult
 ConvertToModule::matchAndRewrite(Operation *op,
@@ -208,8 +210,8 @@ ConvertToModule::matchAndRewrite(Operation *op,
 }
 
 ConvertToSubgroupBallot::ConvertToSubgroupBallot(MLIRContext *context)
-    : RewritePattern("test.convert_to_subgroup_ballot_op",
-                     {"spv.SubgroupBallotKHR"}, 1, context) {}
+    : RewritePattern("test.convert_to_subgroup_ballot_op", 1, context,
+                     {"spv.SubgroupBallotKHR"}) {}
 
 LogicalResult
 ConvertToSubgroupBallot::matchAndRewrite(Operation *op,

@@ -131,7 +131,7 @@ define i32 @test10(i8* %str1, i8* %str2, i32 %n) {
 ; strncmp(x, y, 5)  -> strncmp(nonnull x, nonnull y, 5)
 define i32 @test11(i8* %str1, i8* %str2, i32 %n) {
 ; CHECK-LABEL: @test11(
-; CHECK-NEXT:    [[TEMP1:%.*]] = call i32 @strncmp(i8* nonnull dereferenceable(1) [[STR1:%.*]], i8* nonnull dereferenceable(1) [[STR2:%.*]], i32 5)
+; CHECK-NEXT:    [[TEMP1:%.*]] = call i32 @strncmp(i8* noundef nonnull dereferenceable(1) [[STR1:%.*]], i8* noundef nonnull dereferenceable(1) [[STR2:%.*]], i32 5)
 ; CHECK-NEXT:    ret i32 [[TEMP1]]
 ;
 
@@ -139,7 +139,7 @@ define i32 @test11(i8* %str1, i8* %str2, i32 %n) {
   ret i32 %temp1
 }
 
-define i32 @test12(i8* %str1, i8* %str2, i32 %n) "null-pointer-is-valid"="true" {
+define i32 @test12(i8* %str1, i8* %str2, i32 %n) null_pointer_is_valid {
 ; CHECK-LABEL: @test12(
 ; CHECK-NEXT:    [[TEMP1:%.*]] = call i32 @strncmp(i8* [[STR1:%.*]], i8* [[STR2:%.*]], i32 [[N:%.*]])
 ; CHECK-NEXT:    ret i32 [[TEMP1]]

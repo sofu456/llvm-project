@@ -6,8 +6,16 @@
 //
 //===----------------------------------------------------------------------===//
 
-// UNSUPPORTED: c++98, c++03, c++11, c++14
-// XFAIL: dylib-has-no-filesystem
+// UNSUPPORTED: c++03, c++11, c++14
+// UNSUPPORTED: libcpp-has-no-filesystem-library
+
+// Filesystem is supported on Apple platforms starting with macosx10.15.
+// UNSUPPORTED: with_system_cxx_lib=macosx10.14
+// UNSUPPORTED: with_system_cxx_lib=macosx10.13
+// UNSUPPORTED: with_system_cxx_lib=macosx10.12
+// UNSUPPORTED: with_system_cxx_lib=macosx10.11
+// UNSUPPORTED: with_system_cxx_lib=macosx10.10
+// UNSUPPORTED: with_system_cxx_lib=macosx10.9
 
 // <fstream>
 
@@ -36,7 +44,7 @@ int main(int, char**) {
     stream >> x;
     assert(x == 3.25);
   }
-  std::remove(p.c_str());
+  std::remove(p.string().c_str());
   {
     std::wfstream stream;
     assert(!stream.is_open());
@@ -49,7 +57,7 @@ int main(int, char**) {
     stream >> x;
     assert(x == 3.25);
   }
-  std::remove(p.c_str());
+  std::remove(p.string().c_str());
 
   return 0;
 }

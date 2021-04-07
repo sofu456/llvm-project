@@ -263,6 +263,7 @@ a:
         mtlo      $25
         mul       $s0,$s4,$at
         mul.d     $f20,$f20,$f16
+        mul.ps    $f14,$f0,$f16        # CHECK: mul.ps $f14, $f0, $f16 # encoding: [0x46,0xd0,0x03,0x82]
         mul.s     $f30,$f10,$f2
         mult      $sp,$s4
         mult      $sp,$v0
@@ -283,8 +284,7 @@ a:
         or        $12,$s0,$sp
         or        $2, 4                # CHECK: ori $2, $2, 4           # encoding: [0x34,0x42,0x00,0x04]
         pause                          # CHECK: pause # encoding:  [0x00,0x00,0x01,0x40]
-                                       # CHECK-NEXT:  # <MCInst #{{[0-9]+}} PAUSE
-                                       # CHECK-NOT    # <MCInst #{{[0-9}+}} PAUSE_MM
+                                       # CHECK-NEXT:  # <MCInst #{{[0-9]+}} PAUSE>
         pll.ps  $f26,$f10,$f30         # CHECK: pll.ps $f26, $f10, $f30  # encoding: [0x46,0xde,0x56,0xac]
                                        # CHECK:                          # <MCInst #{{[0-9]+}} PLL_PS64
         plu.ps  $f2,$f26,$f30          # CHECK: plu.ps $f2, $f26, $f30    # encoding: [0x46,0xde,0xd0,0xad]
@@ -400,6 +400,7 @@ a:
         sub       $22,$17,-3126        # CHECK: addi $22, $17, 3126    # encoding: [0x22,0x36,0x0c,0x36]
         sub       $13,6512             # CHECK: addi $13, $13, -6512   # encoding: [0x21,0xad,0xe6,0x90]
         sub.d     $f18,$f3,$f17
+        sub.ps    $f5,$f14,$f26        # CHECK: sub.ps $f5, $f14, $f26 # encoding: [0x46,0xda,0x71,0x41]
         sub.s     $f23,$f22,$f22
         subu      $sp,$s6,$s6
         suxc1     $f12,$k1($13)

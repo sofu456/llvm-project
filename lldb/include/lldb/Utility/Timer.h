@@ -25,6 +25,7 @@ public:
   class Category {
   public:
     explicit Category(const char *category_name);
+    llvm::StringRef GetName() { return m_name; }
 
   private:
     friend class Timer;
@@ -34,7 +35,8 @@ public:
     std::atomic<uint64_t> m_count;
     std::atomic<Category *> m_next;
 
-    DISALLOW_COPY_AND_ASSIGN(Category);
+    Category(const Category &) = delete;
+    const Category &operator=(const Category &) = delete;
   };
 
   /// Default constructor.
@@ -66,9 +68,17 @@ protected:
   static std::atomic<unsigned> g_display_depth;
 
 private:
-  DISALLOW_COPY_AND_ASSIGN(Timer);
+  Timer(const Timer &) = delete;
+  const Timer &operator=(const Timer &) = delete;
 };
 
 } // namespace lldb_private
+
+#define LLDB_SCOPED_TIMER()                                                    \
+  static ::lldb_private::Timer::Category _cat(LLVM_PRETTY_FUNCTION);           \
+  ::lldb_private::Timer _scoped_timer(_cat, "%s", LLVM_PRETTY_FUNCTION)
+#define LLDB_SCOPED_TIMERF(...)                                                \
+  static ::lldb_private::Timer::Category _cat(LLVM_PRETTY_FUNCTION);           \
+  ::lldb_private::Timer _scoped_timer(_cat, __VA_ARGS__)
 
 #endif // LLDB_UTILITY_TIMER_H

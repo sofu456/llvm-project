@@ -11,19 +11,20 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Pass/Pass.h"
+#include "PassDetail.h"
 #include "mlir/Transforms/Passes.h"
 
 using namespace mlir;
 
 namespace {
-struct SymbolDCE : public OperationPass<SymbolDCE> {
+struct SymbolDCE : public SymbolDCEBase<SymbolDCE> {
   void runOnOperation() override;
 
   /// Compute the liveness of the symbols within the given symbol table.
   /// `symbolTableIsHidden` is true if this symbol table is known to be
   /// unaccessible from operations in its parent regions.
   LogicalResult computeLiveness(Operation *symbolTableOp,
+                                SymbolTableCollection &symbolTable,
                                 bool symbolTableIsHidden,
                                 DenseSet<Operation *> &liveSymbols);
 };
@@ -43,14 +44,15 @@ void SymbolDCE::runOnOperation() {
   // A flag that signals if the top level symbol table is hidden, i.e. not
   // accessible from parent scopes.
   bool symbolTableIsHidden = true;
-  if (symbolTableOp->getParentOp() && SymbolTable::isSymbol(symbolTableOp)) {
-    symbolTableIsHidden = SymbolTable::getSymbolVisibility(symbolTableOp) ==
-                          SymbolTable::Visibility::Private;
-  }
+  SymbolOpInterface symbol = dyn_cast<SymbolOpInterface>(symbolTableOp);
+  if (symbolTableOp->getParentOp() && symbol)
+    symbolTableIsHidden = symbol.isPrivate();
 
   // Compute the set of live symbols within the symbol table.
   DenseSet<Operation *> liveSymbols;
-  if (failed(computeLiveness(symbolTableOp, symbolTableIsHidden, liveSymbols)))
+  SymbolTableCollection symbolTable;
+  if (failed(computeLiveness(symbolTableOp, symbolTable, symbolTableIsHidden,
+                             liveSymbols)))
     return signalPassFailure();
 
   // After computing the liveness, delete all of the symbols that were found to
@@ -59,9 +61,8 @@ void SymbolDCE::runOnOperation() {
     if (!nestedSymbolTable->hasTrait<OpTrait::SymbolTable>())
       return;
     for (auto &block : nestedSymbolTable->getRegion(0)) {
-      for (Operation &op :
-           llvm::make_early_inc_range(block.without_terminator())) {
-        if (SymbolTable::isSymbol(&op) && !liveSymbols.count(&op))
+      for (Operation &op : llvm::make_early_inc_range(block)) {
+        if (isa<SymbolOpInterface>(&op) && !liveSymbols.count(&op))
           op.erase();
       }
     }
@@ -72,6 +73,7 @@ void SymbolDCE::runOnOperation() {
 /// `symbolTableIsHidden` is true if this symbol table is known to be
 /// unaccessible from operations in its parent regions.
 LogicalResult SymbolDCE::computeLiveness(Operation *symbolTableOp,
+                                         SymbolTableCollection &symbolTable,
                                          bool symbolTableIsHidden,
                                          DenseSet<Operation *> &liveSymbols) {
   // A worklist of live operations to propagate uses from.
@@ -80,30 +82,16 @@ LogicalResult SymbolDCE::computeLiveness(Operation *symbolTableOp,
   // Walk the symbols within the current symbol table, marking the symbols that
   // are known to be live.
   for (auto &block : symbolTableOp->getRegion(0)) {
-    for (Operation &op : block.without_terminator()) {
-      // Always add non symbol operations to the worklist.
-      if (!SymbolTable::isSymbol(&op)) {
+    // Add all non-symbols or symbols that can't be discarded.
+    for (Operation &op : block) {
+      SymbolOpInterface symbol = dyn_cast<SymbolOpInterface>(&op);
+      if (!symbol) {
         worklist.push_back(&op);
         continue;
       }
-
-      // Check the visibility to see if this symbol may be referenced
-      // externally.
-      SymbolTable::Visibility visibility =
-          SymbolTable::getSymbolVisibility(&op);
-
-      // Private symbols are always initially considered dead.
-      if (visibility == mlir::SymbolTable::Visibility::Private)
-        continue;
-      // We only include nested visibility here if the symbol table isn't
-      // hidden.
-      if (symbolTableIsHidden && visibility == SymbolTable::Visibility::Nested)
-        continue;
-
-      // TODO(riverriddle) Add hooks here to allow symbols to provide additional
-      // information, e.g. linkage can be used to drop some symbols that may
-      // otherwise be considered "live".
-      if (liveSymbols.insert(&op).second)
+      bool isDiscardable = (symbolTableIsHidden || symbol.isPrivate()) &&
+                           symbol.canDiscardOnUseEmpty();
+      if (!isDiscardable && liveSymbols.insert(&op).second)
         worklist.push_back(&op);
     }
   }
@@ -117,10 +105,9 @@ LogicalResult SymbolDCE::computeLiveness(Operation *symbolTableOp,
     if (op->hasTrait<OpTrait::SymbolTable>()) {
       // The internal symbol table is hidden if the parent is, if its not a
       // symbol, or if it is a private symbol.
-      bool symbolIsHidden = symbolTableIsHidden || !SymbolTable::isSymbol(op) ||
-                            SymbolTable::getSymbolVisibility(op) ==
-                                SymbolTable::Visibility::Private;
-      if (failed(computeLiveness(op, symbolIsHidden, liveSymbols)))
+      SymbolOpInterface symbol = dyn_cast<SymbolOpInterface>(op);
+      bool symIsHidden = symbolTableIsHidden || !symbol || symbol.isPrivate();
+      if (failed(computeLiveness(op, symbolTable, symIsHidden, liveSymbols)))
         return failure();
     }
 
@@ -136,7 +123,7 @@ LogicalResult SymbolDCE::computeLiveness(Operation *symbolTableOp,
     for (const SymbolTable::SymbolUse &use : *uses) {
       // Lookup the symbols referenced by this use.
       resolvedSymbols.clear();
-      if (failed(SymbolTable::lookupSymbolIn(
+      if (failed(symbolTable.lookupSymbolIn(
               op->getParentOp(), use.getSymbolRef(), resolvedSymbols))) {
         return use.getUser()->emitError()
                << "unable to resolve reference to symbol "
@@ -156,5 +143,3 @@ LogicalResult SymbolDCE::computeLiveness(Operation *symbolTableOp,
 std::unique_ptr<Pass> mlir::createSymbolDCEPass() {
   return std::make_unique<SymbolDCE>();
 }
-
-static PassRegistration<SymbolDCE> pass("symbol-dce", "Eliminate dead symbols");

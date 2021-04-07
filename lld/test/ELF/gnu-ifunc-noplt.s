@@ -5,6 +5,12 @@
 // RUN: llvm-mc -filetype=obj -triple=x86_64-pc-freebsd %S/Inputs/shared2-x86-64.s -o %t1.o
 // RUN: ld.lld %t1.o --shared -soname=so -o %t.so
 // RUN: llvm-mc -filetype=obj -triple=x86_64-pc-freebsd %s -o %t.o
+
+/// The default -z text is not compatible with -z ifunc-noplt.
+// RUN: not ld.lld -z ifunc-noplt %t.o -o /dev/null 2>&1| FileCheck --check-prefix=INCOMPATIBLE %s
+// RUN: not ld.lld -z ifunc-noplt -z text %t.o -o /dev/null 2>&1| FileCheck --check-prefix=INCOMPATIBLE %s
+// INCOMPATIBLE: -z text and -z ifunc-noplt may not be used together
+
 // RUN: ld.lld -z ifunc-noplt -z notext --hash-style=sysv %t.so %t.o -o %tout
 // RUN: llvm-objdump -d --no-show-raw-insn %tout | FileCheck %s --check-prefix=DISASM
 // RUN: llvm-readobj -r --dynamic-table %tout | FileCheck %s
@@ -12,8 +18,8 @@
 // Check that we emitted relocations for the ifunc calls
 // CHECK: Relocations [
 // CHECK-NEXT:   Section (4) .rela.dyn {
-// CHECK-NEXT:     0x201328 R_X86_64_PLT32 bar 0xFFFFFFFFFFFFFFFC
 // CHECK-NEXT:     0x201323 R_X86_64_PLT32 foo 0xFFFFFFFFFFFFFFFC
+// CHECK-NEXT:     0x201328 R_X86_64_PLT32 bar 0xFFFFFFFFFFFFFFFC
 // CHECK-NEXT:   }
 // CHECK-NEXT:   Section (5) .rela.plt {
 // CHECK-NEXT:     0x203498 R_X86_64_JUMP_SLOT bar2 0x0

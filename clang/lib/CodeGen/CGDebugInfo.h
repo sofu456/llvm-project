@@ -17,6 +17,7 @@
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/ExternalASTSource.h"
+#include "clang/AST/PrettyPrinter.h"
 #include "clang/AST/Type.h"
 #include "clang/AST/TypeOrdering.h"
 #include "clang/Basic/CodeGenOptions.h"
@@ -167,6 +168,7 @@ class CGDebugInfo {
   llvm::DIType *CreateType(const BuiltinType *Ty);
   llvm::DIType *CreateType(const ComplexType *Ty);
   llvm::DIType *CreateType(const AutoType *Ty);
+  llvm::DIType *CreateType(const ExtIntType *Ty);
   llvm::DIType *CreateQualifiedType(QualType Ty, llvm::DIFile *Fg);
   llvm::DIType *CreateType(const TypedefType *Ty, llvm::DIFile *Fg);
   llvm::DIType *CreateType(const TemplateSpecializationType *Ty,
@@ -190,6 +192,7 @@ class CGDebugInfo {
   llvm::DIType *CreateType(const ObjCTypeParamType *Ty, llvm::DIFile *Unit);
 
   llvm::DIType *CreateType(const VectorType *Ty, llvm::DIFile *F);
+  llvm::DIType *CreateType(const ConstantMatrixType *Ty, llvm::DIFile *F);
   llvm::DIType *CreateType(const ArrayType *Ty, llvm::DIFile *F);
   llvm::DIType *CreateType(const LValueReferenceType *Ty, llvm::DIFile *F);
   llvm::DIType *CreateType(const RValueReferenceType *Ty, llvm::DIFile *Unit);
@@ -321,8 +324,7 @@ class CGDebugInfo {
   /// If the C++ class has vtable info then insert appropriate debug
   /// info entry in EltTys vector.
   void CollectVTableInfo(const CXXRecordDecl *Decl, llvm::DIFile *F,
-                         SmallVectorImpl<llvm::Metadata *> &EltTys,
-                         llvm::DICompositeType *RecordTy);
+                         SmallVectorImpl<llvm::Metadata *> &EltTys);
   /// @}
 
   /// Create a new lexical block node and push it on the stack.
@@ -410,10 +412,9 @@ public:
   /// start of a new function.
   /// \param Loc       The location of the function header.
   /// \param ScopeLoc  The location of the function body.
-  void EmitFunctionStart(GlobalDecl GD, SourceLocation Loc,
+  void emitFunctionStart(GlobalDecl GD, SourceLocation Loc,
                          SourceLocation ScopeLoc, QualType FnType,
-                         llvm::Function *Fn, bool CurFnIsThunk,
-                         CGBuilderTy &Builder);
+                         llvm::Function *Fn, bool CurFnIsThunk);
 
   /// Start a new scope for an inlined function.
   void EmitInlineFunctionStart(CGBuilderTy &Builder, GlobalDecl GD);
@@ -487,6 +488,9 @@ public:
   /// Emit the type explicitly casted to.
   void EmitExplicitCastType(QualType Ty);
 
+  /// Emit the type even if it might not be used.
+  void EmitAndRetainType(QualType Ty);
+
   /// Emit C++ using declaration.
   void EmitUsingDecl(const UsingDecl &UD);
 
@@ -506,7 +510,7 @@ public:
   llvm::DIType *getOrCreateStandaloneType(QualType Ty, SourceLocation Loc);
 
   /// Add heapallocsite metadata for MSAllocator calls.
-  void addHeapAllocSiteMetadata(llvm::Instruction *CallSite, QualType Ty,
+  void addHeapAllocSiteMetadata(llvm::CallBase *CallSite, QualType AllocatedTy,
                                 SourceLocation Loc);
 
   void completeType(const EnumDecl *ED);
@@ -597,8 +601,7 @@ private:
 
   /// Get the type from the cache or create a new partial type if
   /// necessary.
-  llvm::DICompositeType *getOrCreateLimitedType(const RecordType *Ty,
-                                                llvm::DIFile *F);
+  llvm::DICompositeType *getOrCreateLimitedType(const RecordType *Ty);
 
   /// Create type metadata for a source language type.
   llvm::DIType *CreateTypeNode(QualType Ty, llvm::DIFile *Fg);

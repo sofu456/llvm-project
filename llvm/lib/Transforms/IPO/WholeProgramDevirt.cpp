@@ -57,14 +57,14 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Triple.h"
 #include "llvm/ADT/iterator_range.h"
-#include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/BasicAliasAnalysis.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/TypeMetadataUtils.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
-#include "llvm/IR/CallSite.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugLoc.h"
@@ -85,7 +85,6 @@
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/PassRegistry.h"
-#include "llvm/PassSupport.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Errc.h"
@@ -95,6 +94,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/FunctionAttrs.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Evaluator.h"
 #include <algorithm>
 #include <cstddef>
@@ -162,6 +162,14 @@ cl::list<std::string>
     SkipFunctionNames("wholeprogramdevirt-skip",
                       cl::desc("Prevent function(s) from being devirtualized"),
                       cl::Hidden, cl::ZeroOrMore, cl::CommaSeparated);
+
+/// Mechanism to add runtime checking of devirtualization decisions, trapping on
+/// any that are not correct. Useful for debugging undefined behavior leading to
+/// failures with WPD.
+cl::opt<bool>
+    CheckDevirt("wholeprogramdevirt-check", cl::init(false), cl::Hidden,
+                cl::ZeroOrMore,
+                cl::desc("Add code to trap on incorrect devirtualizations"));
 
 namespace {
 struct PatternList {
@@ -354,20 +362,20 @@ namespace {
 // A virtual call site. VTable is the loaded virtual table pointer, and CS is
 // the indirect virtual call.
 struct VirtualCallSite {
-  Value *VTable;
-  CallSite CS;
+  Value *VTable = nullptr;
+  CallBase &CB;
 
   // If non-null, this field points to the associated unsafe use count stored in
   // the DevirtModule::NumUnsafeUsesForTypeTest map below. See the description
   // of that field for details.
-  unsigned *NumUnsafeUses;
+  unsigned *NumUnsafeUses = nullptr;
 
   void
   emitRemark(const StringRef OptName, const StringRef TargetName,
              function_ref<OptimizationRemarkEmitter &(Function *)> OREGetter) {
-    Function *F = CS.getCaller();
-    DebugLoc DLoc = CS->getDebugLoc();
-    BasicBlock *Block = CS.getParent();
+    Function *F = CB.getCaller();
+    DebugLoc DLoc = CB.getDebugLoc();
+    BasicBlock *Block = CB.getParent();
 
     using namespace ore;
     OREGetter(F).emit(OptimizationRemark(DEBUG_TYPE, OptName, DLoc, Block)
@@ -382,12 +390,12 @@ struct VirtualCallSite {
       Value *New) {
     if (RemarksEnabled)
       emitRemark(OptName, TargetName, OREGetter);
-    CS->replaceAllUsesWith(New);
-    if (auto II = dyn_cast<InvokeInst>(CS.getInstruction())) {
-      BranchInst::Create(II->getNormalDest(), CS.getInstruction());
+    CB.replaceAllUsesWith(New);
+    if (auto *II = dyn_cast<InvokeInst>(&CB)) {
+      BranchInst::Create(II->getNormalDest(), &CB);
       II->getUnwindDest()->removePredecessor(II->getParent());
     }
-    CS->eraseFromParent();
+    CB.eraseFromParent();
     // This use is no longer unsafe.
     if (NumUnsafeUses)
       --*NumUnsafeUses;
@@ -460,18 +468,18 @@ struct VTableSlotInfo {
   // "this"), grouped by argument list.
   std::map<std::vector<uint64_t>, CallSiteInfo> ConstCSInfo;
 
-  void addCallSite(Value *VTable, CallSite CS, unsigned *NumUnsafeUses);
+  void addCallSite(Value *VTable, CallBase &CB, unsigned *NumUnsafeUses);
 
 private:
-  CallSiteInfo &findCallSiteInfo(CallSite CS);
+  CallSiteInfo &findCallSiteInfo(CallBase &CB);
 };
 
-CallSiteInfo &VTableSlotInfo::findCallSiteInfo(CallSite CS) {
+CallSiteInfo &VTableSlotInfo::findCallSiteInfo(CallBase &CB) {
   std::vector<uint64_t> Args;
-  auto *CI = dyn_cast<IntegerType>(CS.getType());
-  if (!CI || CI->getBitWidth() > 64 || CS.arg_empty())
+  auto *CBType = dyn_cast<IntegerType>(CB.getType());
+  if (!CBType || CBType->getBitWidth() > 64 || CB.arg_empty())
     return CSInfo;
-  for (auto &&Arg : make_range(CS.arg_begin() + 1, CS.arg_end())) {
+  for (auto &&Arg : drop_begin(CB.args())) {
     auto *CI = dyn_cast<ConstantInt>(Arg);
     if (!CI || CI->getBitWidth() > 64)
       return CSInfo;
@@ -480,11 +488,11 @@ CallSiteInfo &VTableSlotInfo::findCallSiteInfo(CallSite CS) {
   return ConstCSInfo[Args];
 }
 
-void VTableSlotInfo::addCallSite(Value *VTable, CallSite CS,
+void VTableSlotInfo::addCallSite(Value *VTable, CallBase &CB,
                                  unsigned *NumUnsafeUses) {
-  auto &CSI = findCallSiteInfo(CS);
+  auto &CSI = findCallSiteInfo(CB);
   CSI.AllCallSitesDevirted = false;
-  CSI.CallSites.push_back({VTable, CS, NumUnsafeUses});
+  CSI.CallSites.push_back({VTable, CB, NumUnsafeUses});
 }
 
 struct DevirtModule {
@@ -500,6 +508,10 @@ struct DevirtModule {
   IntegerType *Int32Ty;
   IntegerType *Int64Ty;
   IntegerType *IntPtrTy;
+  /// Sizeless array type, used for imported vtables. This provides a signal
+  /// to analyzers that these imports may alias, as they do for example
+  /// when multiple unique return values occur in the same vtable.
+  ArrayType *Int8Arr0Ty;
 
   bool RemarksEnabled;
   function_ref<OptimizationRemarkEmitter &(Function *)> OREGetter;
@@ -529,6 +541,7 @@ struct DevirtModule {
         Int32Ty(Type::getInt32Ty(M.getContext())),
         Int64Ty(Type::getInt64Ty(M.getContext())),
         IntPtrTy(M.getDataLayout().getIntPtrType(M.getContext(), 0)),
+        Int8Arr0Ty(ArrayType::get(Type::getInt8Ty(M.getContext()), 0)),
         RemarksEnabled(areRemarksEnabled()), OREGetter(OREGetter) {
     assert(!(ExportSummary && ImportSummary));
     FunctionsToSkip.init(SkipFunctionNames);
@@ -536,7 +549,9 @@ struct DevirtModule {
 
   bool areRemarksEnabled();
 
-  void scanTypeTestUsers(Function *TypeTestFunc);
+  void
+  scanTypeTestUsers(Function *TypeTestFunc,
+                    DenseMap<Metadata *, std::set<TypeMemberInfo>> &TypeIdMap);
   void scanTypeCheckedLoadUsers(Function *TypeCheckedLoadFunc);
 
   void buildTypeIdentifierMap(
@@ -747,6 +762,11 @@ PreservedAnalyses WholeProgramDevirtPass::run(Module &M,
   auto LookupDomTree = [&FAM](Function &F) -> DominatorTree & {
     return FAM.getResult<DominatorTreeAnalysis>(F);
   };
+  if (UseCommandLine) {
+    if (DevirtModule::runForTesting(M, AARGetter, OREGetter, LookupDomTree))
+      return PreservedAnalyses::all();
+    return PreservedAnalyses::none();
+  }
   if (!DevirtModule(M, AARGetter, OREGetter, LookupDomTree, ExportSummary,
                     ImportSummary)
            .run())
@@ -766,8 +786,9 @@ namespace llvm {
 /// If whole program visibility asserted, then upgrade all public vcall
 /// visibility metadata on vtable definitions to linkage unit visibility in
 /// Module IR (for regular or hybrid LTO).
-void updateVCallVisibilityInModule(Module &M,
-                                   bool WholeProgramVisibilityEnabledInLTO) {
+void updateVCallVisibilityInModule(
+    Module &M, bool WholeProgramVisibilityEnabledInLTO,
+    const DenseSet<GlobalValue::GUID> &DynamicExportSymbols) {
   if (!hasWholeProgramVisibility(WholeProgramVisibilityEnabledInLTO))
     return;
   for (GlobalVariable &GV : M.globals())
@@ -775,22 +796,29 @@ void updateVCallVisibilityInModule(Module &M,
     // the vtable definitions. We won't have an existing vcall_visibility
     // metadata on vtable definitions with public visibility.
     if (GV.hasMetadata(LLVMContext::MD_type) &&
-        GV.getVCallVisibility() == GlobalObject::VCallVisibilityPublic)
+        GV.getVCallVisibility() == GlobalObject::VCallVisibilityPublic &&
+        // Don't upgrade the visibility for symbols exported to the dynamic
+        // linker, as we have no information on their eventual use.
+        !DynamicExportSymbols.count(GV.getGUID()))
       GV.setVCallVisibilityMetadata(GlobalObject::VCallVisibilityLinkageUnit);
 }
 
 /// If whole program visibility asserted, then upgrade all public vcall
 /// visibility metadata on vtable definition summaries to linkage unit
 /// visibility in Module summary index (for ThinLTO).
-void updateVCallVisibilityInIndex(ModuleSummaryIndex &Index,
-                                  bool WholeProgramVisibilityEnabledInLTO) {
+void updateVCallVisibilityInIndex(
+    ModuleSummaryIndex &Index, bool WholeProgramVisibilityEnabledInLTO,
+    const DenseSet<GlobalValue::GUID> &DynamicExportSymbols) {
   if (!hasWholeProgramVisibility(WholeProgramVisibilityEnabledInLTO))
     return;
   for (auto &P : Index) {
     for (auto &S : P.second.SummaryList) {
       auto *GVar = dyn_cast<GlobalVarSummary>(S.get());
-      if (!GVar || GVar->vTableFuncs().empty() ||
-          GVar->getVCallVisibility() != GlobalObject::VCallVisibilityPublic)
+      if (!GVar ||
+          GVar->getVCallVisibility() != GlobalObject::VCallVisibilityPublic ||
+          // Don't upgrade the visibility for symbols exported to the dynamic
+          // linker, as we have no information on their eventual use.
+          DynamicExportSymbols.count(P.first))
         continue;
       GVar->setVCallVisibility(GlobalObject::VCallVisibilityLinkageUnit);
     }
@@ -890,7 +918,7 @@ bool DevirtModule::runForTesting(
       ExitOnErr(errorCodeToError(EC));
       WriteIndexToFile(*Summary, OS);
     } else {
-      raw_fd_ostream OS(ClWriteSummary, EC, sys::fs::OF_Text);
+      raw_fd_ostream OS(ClWriteSummary, EC, sys::fs::OF_TextWithCRLF);
       ExitOnErr(errorCodeToError(EC));
       yaml::Output Out(OS);
       Out << *Summary;
@@ -975,12 +1003,10 @@ bool DevirtIndex::tryFindVirtualCallTargets(
     std::vector<ValueInfo> &TargetsForSlot, const TypeIdCompatibleVtableInfo TIdInfo,
     uint64_t ByteOffset) {
   for (const TypeIdOffsetVtableInfo &P : TIdInfo) {
-    // Find the first non-available_externally linkage vtable initializer.
+    // Find a representative copy of the vtable initializer.
     // We can have multiple available_externally, linkonce_odr and weak_odr
-    // vtable initializers, however we want to skip available_externally as they
-    // do not have type metadata attached, and therefore the summary will not
-    // contain any vtable functions. We can also have multiple external
-    // vtable initializers in the case of comdats, which we cannot check here.
+    // vtable initializers. We can also have multiple external vtable
+    // initializers in the case of comdats, which we cannot check here.
     // The linker should give an error in this case.
     //
     // Also, handle the case of same-named local Vtables with the same path
@@ -995,14 +1021,27 @@ bool DevirtIndex::tryFindVirtualCallTargets(
           return false;
         LocalFound = true;
       }
-      if (!GlobalValue::isAvailableExternallyLinkage(S->linkage())) {
-        VS = cast<GlobalVarSummary>(S->getBaseObject());
+      auto *CurVS = cast<GlobalVarSummary>(S->getBaseObject());
+      if (!CurVS->vTableFuncs().empty() ||
+          // Previously clang did not attach the necessary type metadata to
+          // available_externally vtables, in which case there would not
+          // be any vtable functions listed in the summary and we need
+          // to treat this case conservatively (in case the bitcode is old).
+          // However, we will also not have any vtable functions in the
+          // case of a pure virtual base class. In that case we do want
+          // to set VS to avoid treating it conservatively.
+          !GlobalValue::isAvailableExternallyLinkage(S->linkage())) {
+        VS = CurVS;
         // We cannot perform whole program devirtualization analysis on a vtable
         // with public LTO visibility.
         if (VS->getVCallVisibility() == GlobalObject::VCallVisibilityPublic)
           return false;
       }
     }
+    // There will be no VS if all copies are available_externally having no
+    // type metadata. In that case we can't safely perform WPD.
+    if (!VS)
+      return false;
     if (!VS->isLive())
       continue;
     for (auto VTP : VS->vTableFuncs()) {
@@ -1019,13 +1058,36 @@ bool DevirtIndex::tryFindVirtualCallTargets(
 
 void DevirtModule::applySingleImplDevirt(VTableSlotInfo &SlotInfo,
                                          Constant *TheFn, bool &IsExported) {
+  // Don't devirtualize function if we're told to skip it
+  // in -wholeprogramdevirt-skip.
+  if (FunctionsToSkip.match(TheFn->stripPointerCasts()->getName()))
+    return;
   auto Apply = [&](CallSiteInfo &CSInfo) {
     for (auto &&VCallSite : CSInfo.CallSites) {
       if (RemarksEnabled)
         VCallSite.emitRemark("single-impl",
                              TheFn->stripPointerCasts()->getName(), OREGetter);
-      VCallSite.CS.setCalledFunction(ConstantExpr::getBitCast(
-          TheFn, VCallSite.CS.getCalledValue()->getType()));
+      auto &CB = VCallSite.CB;
+      IRBuilder<> Builder(&CB);
+      Value *Callee =
+          Builder.CreateBitCast(TheFn, CB.getCalledOperand()->getType());
+
+      // If checking is enabled, add support to compare the virtual function
+      // pointer to the devirtualized target. In case of a mismatch, perform a
+      // debug trap.
+      if (CheckDevirt) {
+        auto *Cond = Builder.CreateICmpNE(CB.getCalledOperand(), Callee);
+        Instruction *ThenTerm =
+            SplitBlockAndInsertIfThen(Cond, &CB, /*Unreachable=*/false);
+        Builder.SetInsertPoint(ThenTerm);
+        Function *TrapFn = Intrinsic::getDeclaration(&M, Intrinsic::debugtrap);
+        auto *CallTrap = Builder.CreateCall(TrapFn);
+        CallTrap->setDebugLoc(CB.getDebugLoc());
+      }
+
+      // Devirtualize.
+      CB.setCalledOperand(Callee);
+
       // This use is no longer unsafe.
       if (VCallSite.NumUnsafeUses)
         --*VCallSite.NumUnsafeUses;
@@ -1091,7 +1153,7 @@ bool DevirtModule::trySingleImplDevirt(
   // to make it visible to thin LTO objects. We can only get here during the
   // ThinLTO export phase.
   if (TheFn->hasLocalLinkage()) {
-    std::string NewName = (TheFn->getName() + "$merged").str();
+    std::string NewName = (TheFn->getName() + ".llvm.merged").str();
 
     // Since we are renaming the function, any comdats with the same name must
     // also be renamed. This is required when targeting COFF, as the comdat name
@@ -1248,11 +1310,11 @@ void DevirtModule::applyICallBranchFunnel(VTableSlotInfo &SlotInfo,
     if (CSInfo.AllCallSitesDevirted)
       return;
     for (auto &&VCallSite : CSInfo.CallSites) {
-      CallSite CS = VCallSite.CS;
+      CallBase &CB = VCallSite.CB;
 
       // Jump tables are only profitable if the retpoline mitigation is enabled.
-      Attribute FSAttr = CS.getCaller()->getFnAttribute("target-features");
-      if (FSAttr.hasAttribute(Attribute::None) ||
+      Attribute FSAttr = CB.getCaller()->getFnAttribute("target-features");
+      if (!FSAttr.isValid() ||
           !FSAttr.getValueAsString().contains("+retpoline"))
         continue;
 
@@ -1264,42 +1326,39 @@ void DevirtModule::applyICallBranchFunnel(VTableSlotInfo &SlotInfo,
       // x86_64.
       std::vector<Type *> NewArgs;
       NewArgs.push_back(Int8PtrTy);
-      for (Type *T : CS.getFunctionType()->params())
-        NewArgs.push_back(T);
+      append_range(NewArgs, CB.getFunctionType()->params());
       FunctionType *NewFT =
-          FunctionType::get(CS.getFunctionType()->getReturnType(), NewArgs,
-                            CS.getFunctionType()->isVarArg());
+          FunctionType::get(CB.getFunctionType()->getReturnType(), NewArgs,
+                            CB.getFunctionType()->isVarArg());
       PointerType *NewFTPtr = PointerType::getUnqual(NewFT);
 
-      IRBuilder<> IRB(CS.getInstruction());
+      IRBuilder<> IRB(&CB);
       std::vector<Value *> Args;
       Args.push_back(IRB.CreateBitCast(VCallSite.VTable, Int8PtrTy));
-      for (unsigned I = 0; I != CS.getNumArgOperands(); ++I)
-        Args.push_back(CS.getArgOperand(I));
+      llvm::append_range(Args, CB.args());
 
-      CallSite NewCS;
-      if (CS.isCall())
+      CallBase *NewCS = nullptr;
+      if (isa<CallInst>(CB))
         NewCS = IRB.CreateCall(NewFT, IRB.CreateBitCast(JT, NewFTPtr), Args);
       else
-        NewCS = IRB.CreateInvoke(
-            NewFT, IRB.CreateBitCast(JT, NewFTPtr),
-            cast<InvokeInst>(CS.getInstruction())->getNormalDest(),
-            cast<InvokeInst>(CS.getInstruction())->getUnwindDest(), Args);
-      NewCS.setCallingConv(CS.getCallingConv());
+        NewCS = IRB.CreateInvoke(NewFT, IRB.CreateBitCast(JT, NewFTPtr),
+                                 cast<InvokeInst>(CB).getNormalDest(),
+                                 cast<InvokeInst>(CB).getUnwindDest(), Args);
+      NewCS->setCallingConv(CB.getCallingConv());
 
-      AttributeList Attrs = CS.getAttributes();
+      AttributeList Attrs = CB.getAttributes();
       std::vector<AttributeSet> NewArgAttrs;
       NewArgAttrs.push_back(AttributeSet::get(
           M.getContext(), ArrayRef<Attribute>{Attribute::get(
                               M.getContext(), Attribute::Nest)}));
       for (unsigned I = 0; I + 2 <  Attrs.getNumAttrSets(); ++I)
         NewArgAttrs.push_back(Attrs.getParamAttributes(I));
-      NewCS.setAttributes(
+      NewCS->setAttributes(
           AttributeList::get(M.getContext(), Attrs.getFnAttributes(),
                              Attrs.getRetAttributes(), NewArgAttrs));
 
-      CS->replaceAllUsesWith(NewCS.getInstruction());
-      CS->eraseFromParent();
+      CB.replaceAllUsesWith(NewCS);
+      CB.eraseFromParent();
 
       // This use is no longer unsafe.
       if (VCallSite.NumUnsafeUses)
@@ -1350,7 +1409,7 @@ void DevirtModule::applyUniformRetValOpt(CallSiteInfo &CSInfo, StringRef FnName,
   for (auto Call : CSInfo.CallSites)
     Call.replaceAndErase(
         "uniform-ret-val", FnName, RemarksEnabled, OREGetter,
-        ConstantInt::get(cast<IntegerType>(Call.CS.getType()), TheRetVal));
+        ConstantInt::get(cast<IntegerType>(Call.CB.getType()), TheRetVal));
   CSInfo.markDevirt();
 }
 
@@ -1415,7 +1474,8 @@ void DevirtModule::exportConstant(VTableSlot Slot, ArrayRef<uint64_t> Args,
 
 Constant *DevirtModule::importGlobal(VTableSlot Slot, ArrayRef<uint64_t> Args,
                                      StringRef Name) {
-  Constant *C = M.getOrInsertGlobal(getGlobalName(Slot, Args, Name), Int8Ty);
+  Constant *C =
+      M.getOrInsertGlobal(getGlobalName(Slot, Args, Name), Int8Arr0Ty);
   auto *GV = dyn_cast<GlobalVariable>(C);
   if (GV)
     GV->setVisibility(GlobalValue::HiddenVisibility);
@@ -1455,11 +1515,11 @@ void DevirtModule::applyUniqueRetValOpt(CallSiteInfo &CSInfo, StringRef FnName,
                                         bool IsOne,
                                         Constant *UniqueMemberAddr) {
   for (auto &&Call : CSInfo.CallSites) {
-    IRBuilder<> B(Call.CS.getInstruction());
+    IRBuilder<> B(&Call.CB);
     Value *Cmp =
-        B.CreateICmp(IsOne ? ICmpInst::ICMP_EQ : ICmpInst::ICMP_NE,
-                     B.CreateBitCast(Call.VTable, Int8PtrTy), UniqueMemberAddr);
-    Cmp = B.CreateZExt(Cmp, Call.CS->getType());
+        B.CreateICmp(IsOne ? ICmpInst::ICMP_EQ : ICmpInst::ICMP_NE, Call.VTable,
+                     B.CreateBitCast(UniqueMemberAddr, Call.VTable->getType()));
+    Cmp = B.CreateZExt(Cmp, Call.CB.getType());
     Call.replaceAndErase("unique-ret-val", FnName, RemarksEnabled, OREGetter,
                          Cmp);
   }
@@ -1523,8 +1583,8 @@ bool DevirtModule::tryUniqueRetValOpt(
 void DevirtModule::applyVirtualConstProp(CallSiteInfo &CSInfo, StringRef FnName,
                                          Constant *Byte, Constant *Bit) {
   for (auto Call : CSInfo.CallSites) {
-    auto *RetType = cast<IntegerType>(Call.CS.getType());
-    IRBuilder<> B(Call.CS.getInstruction());
+    auto *RetType = cast<IntegerType>(Call.CB.getType());
+    IRBuilder<> B(&Call.CB);
     Value *Addr =
         B.CreateGEP(Int8Ty, B.CreateBitCast(Call.VTable, Int8PtrTy), Byte);
     if (RetType->getBitWidth() == 1) {
@@ -1649,10 +1709,8 @@ void DevirtModule::rebuildGlobal(VTableBits &B) {
 
   // Align the before byte array to the global's minimum alignment so that we
   // don't break any alignment requirements on the global.
-  MaybeAlign Alignment(B.GV->getAlignment());
-  if (!Alignment)
-    Alignment =
-        Align(M.getDataLayout().getABITypeAlignment(B.GV->getValueType()));
+  Align Alignment = M.getDataLayout().getValueOrABITypeAlignment(
+      B.GV->getAlign(), B.GV->getValueType());
   B.Before.Bytes.resize(alignTo(B.Before.Bytes.size(), Alignment));
 
   // Before was stored in reverse order; flip it now.
@@ -1704,13 +1762,14 @@ bool DevirtModule::areRemarksEnabled() {
   return false;
 }
 
-void DevirtModule::scanTypeTestUsers(Function *TypeTestFunc) {
+void DevirtModule::scanTypeTestUsers(
+    Function *TypeTestFunc,
+    DenseMap<Metadata *, std::set<TypeMemberInfo>> &TypeIdMap) {
   // Find all virtual calls via a virtual table pointer %p under an assumption
   // of the form llvm.assume(llvm.type.test(%p, %md)). This indicates that %p
   // points to a member of the type identifier %md. Group calls by (type ID,
   // offset) pair (effectively the identity of the virtual function) and store
   // to CallSlots.
-  DenseSet<CallSite> SeenCallSites;
   for (auto I = TypeTestFunc->use_begin(), E = TypeTestFunc->use_end();
        I != E;) {
     auto CI = dyn_cast<CallInst>(I->getUser());
@@ -1724,29 +1783,59 @@ void DevirtModule::scanTypeTestUsers(Function *TypeTestFunc) {
     auto &DT = LookupDomTree(*CI->getFunction());
     findDevirtualizableCallsForTypeTest(DevirtCalls, Assumes, CI, DT);
 
+    Metadata *TypeId =
+        cast<MetadataAsValue>(CI->getArgOperand(1))->getMetadata();
     // If we found any, add them to CallSlots.
     if (!Assumes.empty()) {
-      Metadata *TypeId =
-          cast<MetadataAsValue>(CI->getArgOperand(1))->getMetadata();
       Value *Ptr = CI->getArgOperand(0)->stripPointerCasts();
-      for (DevirtCallSite Call : DevirtCalls) {
-        // Only add this CallSite if we haven't seen it before. The vtable
-        // pointer may have been CSE'd with pointers from other call sites,
-        // and we don't want to process call sites multiple times. We can't
-        // just skip the vtable Ptr if it has been seen before, however, since
-        // it may be shared by type tests that dominate different calls.
-        if (SeenCallSites.insert(Call.CS).second)
-          CallSlots[{TypeId, Call.Offset}].addCallSite(Ptr, Call.CS, nullptr);
-      }
+      for (DevirtCallSite Call : DevirtCalls)
+        CallSlots[{TypeId, Call.Offset}].addCallSite(Ptr, Call.CB, nullptr);
     }
 
-    // We no longer need the assumes or the type test.
-    for (auto Assume : Assumes)
-      Assume->eraseFromParent();
-    // We can't use RecursivelyDeleteTriviallyDeadInstructions here because we
-    // may use the vtable argument later.
-    if (CI->use_empty())
-      CI->eraseFromParent();
+    auto RemoveTypeTestAssumes = [&]() {
+      // We no longer need the assumes or the type test.
+      for (auto Assume : Assumes)
+        Assume->eraseFromParent();
+      // We can't use RecursivelyDeleteTriviallyDeadInstructions here because we
+      // may use the vtable argument later.
+      if (CI->use_empty())
+        CI->eraseFromParent();
+    };
+
+    // At this point we could remove all type test assume sequences, as they
+    // were originally inserted for WPD. However, we can keep these in the
+    // code stream for later analysis (e.g. to help drive more efficient ICP
+    // sequences). They will eventually be removed by a second LowerTypeTests
+    // invocation that cleans them up. In order to do this correctly, the first
+    // LowerTypeTests invocation needs to know that they have "Unknown" type
+    // test resolution, so that they aren't treated as Unsat and lowered to
+    // False, which will break any uses on assumes. Below we remove any type
+    // test assumes that will not be treated as Unknown by LTT.
+
+    // The type test assumes will be treated by LTT as Unsat if the type id is
+    // not used on a global (in which case it has no entry in the TypeIdMap).
+    if (!TypeIdMap.count(TypeId))
+      RemoveTypeTestAssumes();
+
+    // For ThinLTO importing, we need to remove the type test assumes if this is
+    // an MDString type id without a corresponding TypeIdSummary. Any
+    // non-MDString type ids are ignored and treated as Unknown by LTT, so their
+    // type test assumes can be kept. If the MDString type id is missing a
+    // TypeIdSummary (e.g. because there was no use on a vcall, preventing the
+    // exporting phase of WPD from analyzing it), then it would be treated as
+    // Unsat by LTT and we need to remove its type test assumes here. If not
+    // used on a vcall we don't need them for later optimization use in any
+    // case.
+    else if (ImportSummary && isa<MDString>(TypeId)) {
+      const TypeIdSummary *TidSummary =
+          ImportSummary->getTypeIdSummary(cast<MDString>(TypeId)->getString());
+      if (!TidSummary)
+        RemoveTypeTestAssumes();
+      else
+        // If one was created it should not be Unsat, because if we reached here
+        // the type id was used on a global.
+        assert(TidSummary->TTRes.TheKind != TypeTestResolution::Unsat);
+    }
   }
 }
 
@@ -1822,7 +1911,7 @@ void DevirtModule::scanTypeCheckedLoadUsers(Function *TypeCheckedLoadFunc) {
     if (HasNonCallUses)
       ++NumUnsafeUses;
     for (DevirtCallSite Call : DevirtCalls) {
-      CallSlots[{TypeId, Call.Offset}].addCallSite(Ptr, Call.CS,
+      CallSlots[{TypeId, Call.Offset}].addCallSite(Ptr, Call.CB,
                                                    &NumUnsafeUses);
     }
 
@@ -1938,8 +2027,13 @@ bool DevirtModule::run() {
       (!TypeCheckedLoadFunc || TypeCheckedLoadFunc->use_empty()))
     return false;
 
+  // Rebuild type metadata into a map for easy lookup.
+  std::vector<VTableBits> Bits;
+  DenseMap<Metadata *, std::set<TypeMemberInfo>> TypeIdMap;
+  buildTypeIdentifierMap(Bits, TypeIdMap);
+
   if (TypeTestFunc && AssumeFunc)
-    scanTypeTestUsers(TypeTestFunc);
+    scanTypeTestUsers(TypeTestFunc, TypeIdMap);
 
   if (TypeCheckedLoadFunc)
     scanTypeCheckedLoadUsers(TypeCheckedLoadFunc);
@@ -1961,10 +2055,6 @@ bool DevirtModule::run() {
     return true;
   }
 
-  // Rebuild type metadata into a map for easy lookup.
-  std::vector<VTableBits> Bits;
-  DenseMap<Metadata *, std::set<TypeMemberInfo>> TypeIdMap;
-  buildTypeIdentifierMap(Bits, TypeIdMap);
   if (TypeIdMap.empty())
     return true;
 
@@ -2021,14 +2111,22 @@ bool DevirtModule::run() {
     // function implementation at offset S.first.ByteOffset, and add to
     // TargetsForSlot.
     std::vector<VirtualCallTarget> TargetsForSlot;
-    if (tryFindVirtualCallTargets(TargetsForSlot, TypeIdMap[S.first.TypeID],
+    WholeProgramDevirtResolution *Res = nullptr;
+    const std::set<TypeMemberInfo> &TypeMemberInfos = TypeIdMap[S.first.TypeID];
+    if (ExportSummary && isa<MDString>(S.first.TypeID) &&
+        TypeMemberInfos.size())
+      // For any type id used on a global's type metadata, create the type id
+      // summary resolution regardless of whether we can devirtualize, so that
+      // lower type tests knows the type id is not Unsat. If it was not used on
+      // a global's type metadata, the TypeIdMap entry set will be empty, and
+      // we don't want to create an entry (with the default Unknown type
+      // resolution), which can prevent detection of the Unsat.
+      Res = &ExportSummary
+                 ->getOrInsertTypeIdSummary(
+                     cast<MDString>(S.first.TypeID)->getString())
+                 .WPDRes[S.first.ByteOffset];
+    if (tryFindVirtualCallTargets(TargetsForSlot, TypeMemberInfos,
                                   S.first.ByteOffset)) {
-      WholeProgramDevirtResolution *Res = nullptr;
-      if (ExportSummary && isa<MDString>(S.first.TypeID))
-        Res = &ExportSummary
-                   ->getOrInsertTypeIdSummary(
-                       cast<MDString>(S.first.TypeID)->getString())
-                   .WPDRes[S.first.ByteOffset];
 
       if (!trySingleImplDevirt(ExportSummary, TargetsForSlot, S.second, Res)) {
         DidVirtualConstProp |=
@@ -2142,11 +2240,14 @@ void DevirtIndex::run() {
     std::vector<ValueInfo> TargetsForSlot;
     auto TidSummary = ExportSummary.getTypeIdCompatibleVtableSummary(S.first.TypeID);
     assert(TidSummary);
+    // Create the type id summary resolution regardlness of whether we can
+    // devirtualize, so that lower type tests knows the type id is used on
+    // a global and not Unsat.
+    WholeProgramDevirtResolution *Res =
+        &ExportSummary.getOrInsertTypeIdSummary(S.first.TypeID)
+             .WPDRes[S.first.ByteOffset];
     if (tryFindVirtualCallTargets(TargetsForSlot, *TidSummary,
                                   S.first.ByteOffset)) {
-      WholeProgramDevirtResolution *Res =
-          &ExportSummary.getOrInsertTypeIdSummary(S.first.TypeID)
-               .WPDRes[S.first.ByteOffset];
 
       if (!trySingleImplDevirt(TargetsForSlot, S.first, S.second, Res,
                                DevirtTargets))
@@ -2159,6 +2260,4 @@ void DevirtIndex::run() {
   if (PrintSummaryDevirt)
     for (const auto &DT : DevirtTargets)
       errs() << "Devirtualized call to " << DT << "\n";
-
-  return;
 }

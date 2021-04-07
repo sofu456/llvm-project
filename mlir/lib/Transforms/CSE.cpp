@@ -7,16 +7,13 @@
 //===----------------------------------------------------------------------===//
 //
 // This transformation pass performs a simple common sub-expression elimination
-// algorithm on operations within a function.
+// algorithm on operations within a region.
 //
 //===----------------------------------------------------------------------===//
 
-#include "mlir/Analysis/Dominance.h"
-#include "mlir/IR/Attributes.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/Function.h"
+#include "PassDetail.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Support/Functional.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/Utils.h"
 #include "llvm/ADT/DenseMapInfo.h"
@@ -25,21 +22,13 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/RecyclingAllocator.h"
 #include <deque>
+
 using namespace mlir;
 
 namespace {
-// TODO(riverriddle) Handle commutative operations.
 struct SimpleOperationInfo : public llvm::DenseMapInfo<Operation *> {
   static unsigned getHashValue(const Operation *opC) {
-    auto *op = const_cast<Operation *>(opC);
-    // Hash the operations based upon their:
-    //   - Operation Name
-    //   - Attributes
-    //   - Result Types
-    //   - Operands
-    return llvm::hash_combine(
-        op->getName(), op->getAttrList().getDictionary(), op->getResultTypes(),
-        llvm::hash_combine_range(op->operand_begin(), op->operand_end()));
+    return OperationEquivalence::computeHash(const_cast<Operation *>(opC));
   }
   static bool isEqual(const Operation *lhsC, const Operation *rhsC) {
     auto *lhs = const_cast<Operation *>(lhsC);
@@ -49,34 +38,15 @@ struct SimpleOperationInfo : public llvm::DenseMapInfo<Operation *> {
     if (lhs == getTombstoneKey() || lhs == getEmptyKey() ||
         rhs == getTombstoneKey() || rhs == getEmptyKey())
       return false;
-
-    // Compare the operation name.
-    if (lhs->getName() != rhs->getName())
-      return false;
-    // Check operand and result type counts.
-    if (lhs->getNumOperands() != rhs->getNumOperands() ||
-        lhs->getNumResults() != rhs->getNumResults())
-      return false;
-    // Compare attributes.
-    if (lhs->getAttrList() != rhs->getAttrList())
-      return false;
-    // Compare operands.
-    if (!std::equal(lhs->operand_begin(), lhs->operand_end(),
-                    rhs->operand_begin()))
-      return false;
-    // Compare result types.
-    return std::equal(lhs->result_type_begin(), lhs->result_type_end(),
-                      rhs->result_type_begin());
+    return OperationEquivalence::isEquivalentTo(const_cast<Operation *>(lhsC),
+                                                const_cast<Operation *>(rhsC));
   }
 };
 } // end anonymous namespace
 
 namespace {
 /// Simple common sub-expression elimination.
-struct CSE : public OperationPass<CSE> {
-  CSE() = default;
-  CSE(const CSE &) {}
-
+struct CSE : public CSEBase<CSE> {
   /// Shared implementation of operation elimination and scoped map definitions.
   using AllocatorTy = llvm::RecyclingAllocator<
       llvm::BumpPtrAllocator,
@@ -94,7 +64,7 @@ struct CSE : public OperationPass<CSE> {
     ScopedMapTy::ScopeTy scope;
 
     DominanceInfoNode *node;
-    DominanceInfoNode::iterator childIterator;
+    DominanceInfoNode::const_iterator childIterator;
 
     /// If this node has been fully processed yet or not.
     bool processed;
@@ -102,10 +72,10 @@ struct CSE : public OperationPass<CSE> {
 
   /// Attempt to eliminate a redundant operation. Returns success if the
   /// operation was marked for removal, failure otherwise.
-  LogicalResult simplifyOperation(ScopedMapTy &knownValues, Operation *op);
-
+  LogicalResult simplifyOperation(ScopedMapTy &knownValues, Operation *op,
+                                  bool hasSSADominance);
   void simplifyBlock(ScopedMapTy &knownValues, DominanceInfo &domInfo,
-                     Block *bb);
+                     Block *bb, bool hasSSADominance);
   void simplifyRegion(ScopedMapTy &knownValues, DominanceInfo &domInfo,
                       Region &region);
 
@@ -114,17 +84,14 @@ struct CSE : public OperationPass<CSE> {
 private:
   /// Operations marked as dead and to be erased.
   std::vector<Operation *> opsToErase;
-
-  /// Statistics for CSE.
-  Statistic numCSE{this, "num-cse'd", "Number of operations CSE'd"};
-  Statistic numDCE{this, "num-dce'd", "Number of operations trivially DCE'd"};
 };
 } // end anonymous namespace
 
 /// Attempt to eliminate a redundant operation.
-LogicalResult CSE::simplifyOperation(ScopedMapTy &knownValues, Operation *op) {
+LogicalResult CSE::simplifyOperation(ScopedMapTy &knownValues, Operation *op,
+                                     bool hasSSADominance) {
   // Don't simplify terminator operations.
-  if (op->isKnownTerminator())
+  if (op->hasTrait<OpTrait::IsTerminator>())
     return failure();
 
   // If the operation is already trivially dead just add it to the erase list.
@@ -140,17 +107,36 @@ LogicalResult CSE::simplifyOperation(ScopedMapTy &knownValues, Operation *op) {
   if (op->getNumRegions() != 0)
     return failure();
 
-  // TODO(riverriddle) We currently only eliminate non side-effecting
+  // TODO: We currently only eliminate non side-effecting
   // operations.
   if (!MemoryEffectOpInterface::hasNoEffect(op))
     return failure();
 
   // Look for an existing definition for the operation.
   if (auto *existing = knownValues.lookup(op)) {
+
     // If we find one then replace all uses of the current operation with the
-    // existing one and mark it for deletion.
-    op->replaceAllUsesWith(existing);
-    opsToErase.push_back(op);
+    // existing one and mark it for deletion. We can only replace an operand in
+    // an operation if it has not been visited yet.
+    if (hasSSADominance) {
+      // If the region has SSA dominance, then we are guaranteed to have not
+      // visited any use of the current operation.
+      op->replaceAllUsesWith(existing);
+      opsToErase.push_back(op);
+    } else {
+      // When the region does not have SSA dominance, we need to check if we
+      // have visited a use before replacing any use.
+      for (auto it : llvm::zip(op->getResults(), existing->getResults())) {
+        std::get<0>(it).replaceUsesWithIf(
+            std::get<1>(it), [&](OpOperand &operand) {
+              return !knownValues.count(operand.getOwner());
+            });
+      }
+
+      // There may be some remaining uses of the operation.
+      if (op->use_empty())
+        opsToErase.push_back(op);
+    }
 
     // If the existing operation has an unknown location and the current
     // operation doesn't, then set the existing op's location to that of the
@@ -170,16 +156,16 @@ LogicalResult CSE::simplifyOperation(ScopedMapTy &knownValues, Operation *op) {
 }
 
 void CSE::simplifyBlock(ScopedMapTy &knownValues, DominanceInfo &domInfo,
-                        Block *bb) {
+                        Block *bb, bool hasSSADominance) {
   for (auto &inst : *bb) {
     // If the operation is simplified, we don't process any held regions.
-    if (succeeded(simplifyOperation(knownValues, &inst)))
+    if (succeeded(simplifyOperation(knownValues, &inst, hasSSADominance)))
       continue;
 
     // If this operation is isolated above, we can't process nested regions with
     // the given 'knownValues' map. This would cause the insertion of implicit
     // captures in explicit capture only regions.
-    if (!inst.isRegistered() || inst.isKnownIsolatedFromAbove()) {
+    if (inst.mightHaveTrait<OpTrait::IsIsolatedFromAbove>()) {
       ScopedMapTy nestedKnownValues;
       for (auto &region : inst.getRegions())
         simplifyRegion(nestedKnownValues, domInfo, region);
@@ -198,12 +184,20 @@ void CSE::simplifyRegion(ScopedMapTy &knownValues, DominanceInfo &domInfo,
   if (region.empty())
     return;
 
+  bool hasSSADominance = domInfo.hasDominanceInfo(&region);
+
   // If the region only contains one block, then simplify it directly.
   if (std::next(region.begin()) == region.end()) {
     ScopedMapTy::ScopeTy scope(knownValues);
-    simplifyBlock(knownValues, domInfo, &region.front());
+    simplifyBlock(knownValues, domInfo, &region.front(), hasSSADominance);
     return;
   }
+
+  // If the region does not have dominanceInfo, then skip it.
+  // TODO: Regions without SSA dominance should define a different
+  // traversal order which is appropriate and can be used here.
+  if (!hasSSADominance)
+    return;
 
   // Note, deque is being used here because there was significant performance
   // gains over vector when the container becomes very large due to the
@@ -223,7 +217,8 @@ void CSE::simplifyRegion(ScopedMapTy &knownValues, DominanceInfo &domInfo,
     // Check to see if we need to process this node.
     if (!currentNode->processed) {
       currentNode->processed = true;
-      simplifyBlock(knownValues, domInfo, currentNode->node->getBlock());
+      simplifyBlock(knownValues, domInfo, currentNode->node->getBlock(),
+                    hasSSADominance);
     }
 
     // Otherwise, check to see if we need to process a child node.
@@ -262,5 +257,3 @@ void CSE::runOnOperation() {
 }
 
 std::unique_ptr<Pass> mlir::createCSEPass() { return std::make_unique<CSE>(); }
-
-static PassRegistration<CSE> pass("cse", "Eliminate common sub-expressions");

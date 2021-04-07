@@ -6,7 +6,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file imlpements basic functions to debug structured MLIR types at
+// This file implements basic functions to debug structured MLIR types at
 // runtime. Entities in this file may not be compatible with targets without a
 // C++ runtime. These may be progressively migrated to CRunnerUtils.cpp over
 // time.
@@ -15,62 +15,64 @@
 
 #include "mlir/ExecutionEngine/RunnerUtils.h"
 
+extern "C" void
+_mlir_ciface_print_memref_shape_i8(UnrankedMemRefType<int8_t> *M) {
+  std::cout << "Unranked Memref ";
+  printMemRefMetaData(std::cout, DynamicMemRefType<int8_t>(*M));
+  std::cout << "\n";
+}
+
+extern "C" void
+_mlir_ciface_print_memref_shape_i32(UnrankedMemRefType<int32_t> *M) {
+  std::cout << "Unranked Memref ";
+  printMemRefMetaData(std::cout, DynamicMemRefType<int32_t>(*M));
+  std::cout << "\n";
+}
+
+extern "C" void
+_mlir_ciface_print_memref_shape_i64(UnrankedMemRefType<int64_t> *M) {
+  std::cout << "Unranked Memref ";
+  printMemRefMetaData(std::cout, DynamicMemRefType<int64_t>(*M));
+  std::cout << "\n";
+}
+
+extern "C" void
+_mlir_ciface_print_memref_shape_f32(UnrankedMemRefType<float> *M) {
+  std::cout << "Unranked Memref ";
+  printMemRefMetaData(std::cout, DynamicMemRefType<float>(*M));
+  std::cout << "\n";
+}
+
+extern "C" void
+_mlir_ciface_print_memref_shape_f64(UnrankedMemRefType<double> *M) {
+  std::cout << "Unranked Memref ";
+  printMemRefMetaData(std::cout, DynamicMemRefType<double>(*M));
+  std::cout << "\n";
+}
+
 extern "C" void _mlir_ciface_print_memref_vector_4x4xf32(
     StridedMemRefType<Vector2D<4, 4, float>, 2> *M) {
   impl::printMemRef(*M);
 }
 
-#define MEMREF_CASE(TYPE, RANK)                                                \
-  case RANK:                                                                   \
-    impl::printMemRef(*(static_cast<StridedMemRefType<TYPE, RANK> *>(ptr)));   \
-    break
-
 extern "C" void _mlir_ciface_print_memref_i8(UnrankedMemRefType<int8_t> *M) {
-  printUnrankedMemRefMetaData(std::cout, *M);
-  int64_t rank = M->rank;
-  void *ptr = M->descriptor;
-
-  switch (rank) {
-    MEMREF_CASE(int8_t, 0);
-    MEMREF_CASE(int8_t, 1);
-    MEMREF_CASE(int8_t, 2);
-    MEMREF_CASE(int8_t, 3);
-    MEMREF_CASE(int8_t, 4);
-  default:
-    assert(0 && "Unsupported rank to print");
-  }
+  impl::printMemRef(*M);
 }
 
 extern "C" void _mlir_ciface_print_memref_i32(UnrankedMemRefType<int32_t> *M) {
-  printUnrankedMemRefMetaData(std::cout, *M);
-  int64_t rank = M->rank;
-  void *ptr = M->descriptor;
+  impl::printMemRef(*M);
+}
 
-  switch (rank) {
-    MEMREF_CASE(int32_t, 0);
-    MEMREF_CASE(int32_t, 1);
-    MEMREF_CASE(int32_t, 2);
-    MEMREF_CASE(int32_t, 3);
-    MEMREF_CASE(int32_t, 4);
-  default:
-    assert(0 && "Unsupported rank to print");
-  }
+extern "C" void _mlir_ciface_print_memref_i64(UnrankedMemRefType<int64_t> *M) {
+  impl::printMemRef(*M);
 }
 
 extern "C" void _mlir_ciface_print_memref_f32(UnrankedMemRefType<float> *M) {
-  printUnrankedMemRefMetaData(std::cout, *M);
-  int64_t rank = M->rank;
-  void *ptr = M->descriptor;
+  impl::printMemRef(*M);
+}
 
-  switch (rank) {
-    MEMREF_CASE(float, 0);
-    MEMREF_CASE(float, 1);
-    MEMREF_CASE(float, 2);
-    MEMREF_CASE(float, 3);
-    MEMREF_CASE(float, 4);
-  default:
-    assert(0 && "Unsupported rank to print");
-  }
+extern "C" void _mlir_ciface_print_memref_f64(UnrankedMemRefType<double> *M) {
+  impl::printMemRef(*M);
 }
 
 extern "C" void print_memref_i32(int64_t rank, void *ptr) {
@@ -78,9 +80,19 @@ extern "C" void print_memref_i32(int64_t rank, void *ptr) {
   _mlir_ciface_print_memref_i32(&descriptor);
 }
 
+extern "C" void print_memref_i64(int64_t rank, void *ptr) {
+  UnrankedMemRefType<int64_t> descriptor = {rank, ptr};
+  _mlir_ciface_print_memref_i64(&descriptor);
+}
+
 extern "C" void print_memref_f32(int64_t rank, void *ptr) {
   UnrankedMemRefType<float> descriptor = {rank, ptr};
   _mlir_ciface_print_memref_f32(&descriptor);
+}
+
+extern "C" void print_memref_f64(int64_t rank, void *ptr) {
+  UnrankedMemRefType<double> descriptor = {rank, ptr};
+  _mlir_ciface_print_memref_f64(&descriptor);
 }
 
 extern "C" void
@@ -102,4 +114,43 @@ _mlir_ciface_print_memref_3d_f32(StridedMemRefType<float, 3> *M) {
 extern "C" void
 _mlir_ciface_print_memref_4d_f32(StridedMemRefType<float, 4> *M) {
   impl::printMemRef(*M);
+}
+
+extern "C" int64_t
+_mlir_ciface_verifyMemRefI32(UnrankedMemRefType<int32_t> *actual,
+                             UnrankedMemRefType<int32_t> *expected) {
+  return impl::verifyMemRef(*actual, *expected);
+}
+
+extern "C" int64_t
+_mlir_ciface_verifyMemRefF32(UnrankedMemRefType<float> *actual,
+                             UnrankedMemRefType<float> *expected) {
+  return impl::verifyMemRef(*actual, *expected);
+}
+
+extern "C" int64_t
+_mlir_ciface_verifyMemRefF64(UnrankedMemRefType<double> *actual,
+                             UnrankedMemRefType<double> *expected) {
+  return impl::verifyMemRef(*actual, *expected);
+}
+
+extern "C" int64_t verifyMemRefI32(int64_t rank, void *actualPtr,
+                                   void *expectedPtr) {
+  UnrankedMemRefType<int32_t> actualDesc = {rank, actualPtr};
+  UnrankedMemRefType<int32_t> expectedDesc = {rank, expectedPtr};
+  return _mlir_ciface_verifyMemRefI32(&actualDesc, &expectedDesc);
+}
+
+extern "C" int64_t verifyMemRefF32(int64_t rank, void *actualPtr,
+                                   void *expectedPtr) {
+  UnrankedMemRefType<float> actualDesc = {rank, actualPtr};
+  UnrankedMemRefType<float> expectedDesc = {rank, expectedPtr};
+  return _mlir_ciface_verifyMemRefF32(&actualDesc, &expectedDesc);
+}
+
+extern "C" int64_t verifyMemRefF64(int64_t rank, void *actualPtr,
+                                   void *expectedPtr) {
+  UnrankedMemRefType<double> actualDesc = {rank, actualPtr};
+  UnrankedMemRefType<double> expectedDesc = {rank, expectedPtr};
+  return _mlir_ciface_verifyMemRefF64(&actualDesc, &expectedDesc);
 }

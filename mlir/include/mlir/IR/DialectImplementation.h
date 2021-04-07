@@ -121,6 +121,10 @@ public:
   virtual llvm::SMLoc getNameLoc() const = 0;
 
   /// Re-encode the given source location as an MLIR location and return it.
+  /// Note: This method should only be used when a `Location` is necessary, as
+  /// the encoding process is not efficient. In other cases a more suitable
+  /// alternative should be used, such as the `getChecked` methods defined
+  /// below.
   virtual Location getEncodedSourceLoc(llvm::SMLoc loc) = 0;
 
   /// Returns the full specification of the symbol being parsed. This allows for
@@ -163,6 +167,22 @@ public:
     return success();
   }
 
+  /// Invoke the `getChecked` method of the given Attribute or Type class, using
+  /// the provided location to emit errors in the case of failure. Note that
+  /// unlike `OpBuilder::getType`, this method does not implicitly insert a
+  /// context parameter.
+  template <typename T, typename... ParamsT>
+  T getChecked(llvm::SMLoc loc, ParamsT &&...params) {
+    return T::getChecked([&] { return emitError(loc); },
+                         std::forward<ParamsT>(params)...);
+  }
+  /// A variant of `getChecked` that uses the result of `getNameLoc` to emit
+  /// errors.
+  template <typename T, typename... ParamsT> T getChecked(ParamsT &&...params) {
+    return T::getChecked([&] { return emitError(getNameLoc()); },
+                         std::forward<ParamsT>(params)...);
+  }
+
   //===--------------------------------------------------------------------===//
   // Token Parsing
   //===--------------------------------------------------------------------===//
@@ -199,6 +219,12 @@ public:
 
   /// Parse a `=` token.
   virtual ParseResult parseEqual() = 0;
+
+  /// Parse a `=` token if present.
+  virtual ParseResult parseOptionalEqual() = 0;
+
+  /// Parse a quoted string token if present.
+  virtual ParseResult parseOptionalString(StringRef *string) = 0;
 
   /// Parse a given keyword.
   ParseResult parseKeyword(StringRef keyword, const Twine &msg = "") {
@@ -281,7 +307,7 @@ public:
 
     // Parse any kind of attribute.
     Attribute attr;
-    if (parseAttribute(attr))
+    if (parseAttribute(attr, type))
       return failure();
 
     // Check for the right kind of attribute.
@@ -319,6 +345,9 @@ public:
       return emitError(loc, "invalid kind of type specified");
     return success();
   }
+
+  /// Parse a type if present.
+  virtual OptionalParseResult parseOptionalType(Type &result) = 0;
 
   /// Parse a 'x' separated dimension list. This populates the dimension list,
   /// using -1 for the `?` dimensions if `allowDynamic` is set and errors out on

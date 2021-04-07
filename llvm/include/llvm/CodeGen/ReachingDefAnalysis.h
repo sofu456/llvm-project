@@ -18,11 +18,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_CODEGEN_REACHINGDEFSANALYSIS_H
-#define LLVM_CODEGEN_REACHINGDEFSANALYSIS_H
+#ifndef LLVM_CODEGEN_REACHINGDEFANALYSIS_H
+#define LLVM_CODEGEN_REACHINGDEFANALYSIS_H
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/TinyPtrVector.h"
 #include "llvm/CodeGen/LoopTraversal.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/InitializePasses.h"
@@ -31,6 +32,38 @@ namespace llvm {
 
 class MachineBasicBlock;
 class MachineInstr;
+
+/// Thin wrapper around "int" used to store reaching definitions,
+/// using an encoding that makes it compatible with TinyPtrVector.
+/// The 0th LSB is forced zero (and will be used for pointer union tagging),
+/// The 1st LSB is forced one (to make sure the value is non-zero).
+class ReachingDef {
+  uintptr_t Encoded;
+  friend struct PointerLikeTypeTraits<ReachingDef>;
+  explicit ReachingDef(uintptr_t Encoded) : Encoded(Encoded) {}
+
+public:
+  ReachingDef(std::nullptr_t) : Encoded(0) {}
+  ReachingDef(int Instr) : Encoded(((uintptr_t) Instr << 2) | 2) {}
+  operator int() const { return ((int) Encoded) >> 2; }
+};
+
+template<>
+struct PointerLikeTypeTraits<ReachingDef> {
+  static constexpr int NumLowBitsAvailable = 1;
+
+  static inline void *getAsVoidPointer(const ReachingDef &RD) {
+    return reinterpret_cast<void *>(RD.Encoded);
+  }
+
+  static inline ReachingDef getFromVoidPointer(void *P) {
+    return ReachingDef(reinterpret_cast<uintptr_t>(P));
+  }
+
+  static inline ReachingDef getFromVoidPointer(const void *P) {
+    return ReachingDef(reinterpret_cast<uintptr_t>(P));
+  }
+};
 
 /// This class provides the reaching def analysis.
 class ReachingDefAnalysis : public MachineFunctionPass {
@@ -61,7 +94,7 @@ private:
   DenseMap<MachineInstr *, int> InstIds;
 
   /// All reaching defs of a given RegUnit for a given MBB.
-  using MBBRegUnitDefs = SmallVector<int, 1>;
+  using MBBRegUnitDefs = TinyPtrVector<ReachingDef>;
   /// All reaching defs of all reg units for a given MBB
   using MBBDefsInfo = std::vector<MBBRegUnitDefs>;
   /// All reaching defs of all reg units for a all MBBs
@@ -106,23 +139,25 @@ public:
 
   /// Provides the instruction id of the closest reaching def instruction of
   /// PhysReg that reaches MI, relative to the begining of MI's basic block.
-  int getReachingDef(MachineInstr *MI, int PhysReg) const;
+  int getReachingDef(MachineInstr *MI, MCRegister PhysReg) const;
 
   /// Return whether A and B use the same def of PhysReg.
-  bool hasSameReachingDef(MachineInstr *A, MachineInstr *B, int PhysReg) const;
+  bool hasSameReachingDef(MachineInstr *A, MachineInstr *B,
+                          MCRegister PhysReg) const;
 
   /// Return whether the reaching def for MI also is live out of its parent
   /// block.
-  bool isReachingDefLiveOut(MachineInstr *MI, int PhysReg) const;
+  bool isReachingDefLiveOut(MachineInstr *MI, MCRegister PhysReg) const;
 
   /// Return the local MI that produces the live out value for PhysReg, or
   /// nullptr for a non-live out or non-local def.
   MachineInstr *getLocalLiveOutMIDef(MachineBasicBlock *MBB,
-                                     int PhysReg) const;
+                                     MCRegister PhysReg) const;
 
   /// If a single MachineInstr creates the reaching definition, then return it.
   /// Otherwise return null.
-  MachineInstr *getUniqueReachingMIDef(MachineInstr *MI, int PhysReg) const;
+  MachineInstr *getUniqueReachingMIDef(MachineInstr *MI,
+                                       MCRegister PhysReg) const;
 
   /// If a single MachineInstr creates the reaching definition, for MIs operand
   /// at Idx, then return it. Otherwise return null.
@@ -134,39 +169,45 @@ public:
 
   /// Provide whether the register has been defined in the same basic block as,
   /// and before, MI.
-  bool hasLocalDefBefore(MachineInstr *MI, int PhysReg) const;
+  bool hasLocalDefBefore(MachineInstr *MI, MCRegister PhysReg) const;
 
   /// Return whether the given register is used after MI, whether it's a local
   /// use or a live out.
-  bool isRegUsedAfter(MachineInstr *MI, int PhysReg) const;
+  bool isRegUsedAfter(MachineInstr *MI, MCRegister PhysReg) const;
 
   /// Return whether the given register is defined after MI.
-  bool isRegDefinedAfter(MachineInstr *MI, int PhysReg) const;
+  bool isRegDefinedAfter(MachineInstr *MI, MCRegister PhysReg) const;
 
   /// Provides the clearance - the number of instructions since the closest
   /// reaching def instuction of PhysReg that reaches MI.
-  int getClearance(MachineInstr *MI, MCPhysReg PhysReg) const;
+  int getClearance(MachineInstr *MI, MCRegister PhysReg) const;
 
   /// Provides the uses, in the same block as MI, of register that MI defines.
   /// This does not consider live-outs.
-  void getReachingLocalUses(MachineInstr *MI, int PhysReg,
+  void getReachingLocalUses(MachineInstr *MI, MCRegister PhysReg,
                             InstSet &Uses) const;
 
   /// Search MBB for a definition of PhysReg and insert it into Defs. If no
   /// definition is found, recursively search the predecessor blocks for them.
-  void getLiveOuts(MachineBasicBlock *MBB, int PhysReg, InstSet &Defs,
+  void getLiveOuts(MachineBasicBlock *MBB, MCRegister PhysReg, InstSet &Defs,
                    BlockSet &VisitedBBs) const;
+  void getLiveOuts(MachineBasicBlock *MBB, MCRegister PhysReg,
+                   InstSet &Defs) const;
 
   /// For the given block, collect the instructions that use the live-in
   /// value of the provided register. Return whether the value is still
   /// live on exit.
-  bool getLiveInUses(MachineBasicBlock *MBB, int PhysReg,
+  bool getLiveInUses(MachineBasicBlock *MBB, MCRegister PhysReg,
                      InstSet &Uses) const;
 
   /// Collect the users of the value stored in PhysReg, which is defined
   /// by MI.
-  void getGlobalUses(MachineInstr *MI, int PhysReg,
-                     InstSet &Uses) const;
+  void getGlobalUses(MachineInstr *MI, MCRegister PhysReg, InstSet &Uses) const;
+
+  /// Collect all possible definitions of the value stored in PhysReg, which is
+  /// used by MI.
+  void getGlobalReachingDefs(MachineInstr *MI, MCRegister PhysReg,
+                             InstSet &Defs) const;
 
   /// Return whether From can be moved forwards to just before To.
   bool isSafeToMoveForwards(MachineInstr *From, MachineInstr *To) const;
@@ -190,22 +231,26 @@ public:
 
   /// Return whether a MachineInstr could be inserted at MI and safely define
   /// the given register without affecting the program.
-  bool isSafeToDefRegAt(MachineInstr *MI, int PhysReg) const;
+  bool isSafeToDefRegAt(MachineInstr *MI, MCRegister PhysReg) const;
 
   /// Return whether a MachineInstr could be inserted at MI and safely define
   /// the given register without affecting the program, ignoring any effects
   /// on the provided instructions.
-  bool isSafeToDefRegAt(MachineInstr *MI, int PhysReg, InstSet &Ignore) const;
+  bool isSafeToDefRegAt(MachineInstr *MI, MCRegister PhysReg,
+                        InstSet &Ignore) const;
 
 private:
   /// Set up LiveRegs by merging predecessor live-out values.
-  void enterBasicBlock(const LoopTraversal::TraversedMBBInfo &TraversedMBB);
+  void enterBasicBlock(MachineBasicBlock *MBB);
 
   /// Update live-out values.
-  void leaveBasicBlock(const LoopTraversal::TraversedMBBInfo &TraversedMBB);
+  void leaveBasicBlock(MachineBasicBlock *MBB);
 
   /// Process he given basic block.
   void processBasicBlock(const LoopTraversal::TraversedMBBInfo &TraversedMBB);
+
+  /// Process block that is part of a loop again.
+  void reprocessBasicBlock(MachineBasicBlock *MBB);
 
   /// Update def-ages for registers defined by MI.
   /// Also break dependencies on partial defs and undef uses.
@@ -227,9 +272,10 @@ private:
 
   /// Provides the instruction of the closest reaching def instruction of
   /// PhysReg that reaches MI, relative to the begining of MI's basic block.
-  MachineInstr *getReachingLocalMIDef(MachineInstr *MI, int PhysReg) const;
+  MachineInstr *getReachingLocalMIDef(MachineInstr *MI,
+                                      MCRegister PhysReg) const;
 };
 
 } // namespace llvm
 
-#endif // LLVM_CODEGEN_REACHINGDEFSANALYSIS_H
+#endif // LLVM_CODEGEN_REACHINGDEFANALYSIS_H

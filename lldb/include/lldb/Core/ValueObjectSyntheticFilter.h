@@ -27,16 +27,16 @@ class Declaration;
 class Status;
 class SyntheticChildrenFrontEnd;
 
-// A ValueObject that obtains its children from some source other than
-// real information
-// This is currently used to implement Python-based children and filters but
-// you can bind it to any source of synthetic information and have it behave
-// accordingly
+/// A ValueObject that obtains its children from some source other than
+/// real information.
+/// This is currently used to implement Python-based children and filters but
+/// you can bind it to any source of synthetic information and have it behave
+/// accordingly.
 class ValueObjectSynthetic : public ValueObject {
 public:
   ~ValueObjectSynthetic() override;
 
-  uint64_t GetByteSize() override;
+  llvm::Optional<uint64_t> GetByteSize() override;
 
   ConstString GetTypeName() override;
 
@@ -66,7 +66,7 @@ public:
 
   bool IsSynthetic() override { return true; }
 
-  void CalculateSyntheticValue(bool use_synthetic) override {}
+  void CalculateSyntheticValue() override {}
 
   bool IsDynamic() override {
     return ((m_parent != nullptr) ? m_parent->IsDynamic() : false);
@@ -148,9 +148,9 @@ protected:
   /// Guarded by m_child_mutex;
   SyntheticChildrenCache m_synthetic_children_cache;
 
-  uint32_t m_synthetic_children_count; // FIXME use the ValueObject's
-                                       // ChildrenManager instead of a special
-                                       // purpose solution
+  // FIXME: use the ValueObject's  ChildrenManager instead of a special purpose
+  // solution.
+  uint32_t m_synthetic_children_count;
 
   ConstString m_parent_type_name;
 
@@ -164,7 +164,8 @@ private:
 
   void CopyValueData(ValueObject *source);
 
-  DISALLOW_COPY_AND_ASSIGN(ValueObjectSynthetic);
+  ValueObjectSynthetic(const ValueObjectSynthetic &) = delete;
+  const ValueObjectSynthetic &operator=(const ValueObjectSynthetic &) = delete;
 };
 
 } // namespace lldb_private

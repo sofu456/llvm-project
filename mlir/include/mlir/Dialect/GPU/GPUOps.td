@@ -13,15 +13,12 @@
 #ifndef GPU_OPS
 #define GPU_OPS
 
+include "mlir/Dialect/DLTI/DLTIBase.td"
 include "mlir/Dialect/GPU/GPUBase.td"
 include "mlir/Dialect/LLVMIR/LLVMOpBase.td"
-include "mlir/Interfaces/SideEffects.td"
-
-// Type constraint accepting standard integers, indices and wrapped LLVM integer
-// types.
-def IntLikeOrLLVMInt : TypeConstraint<
-  Or<[AnySignlessInteger.predicate, Index.predicate, LLVMInt.predicate]>,
-  "integer, index or LLVM dialect equivalent">;
+include "mlir/IR/SymbolInterfaces.td"
+include "mlir/Interfaces/DataLayoutInterfaces.td"
+include "mlir/Interfaces/SideEffectInterfaces.td"
 
 //===----------------------------------------------------------------------===//
 // GPU Dialect operations.
@@ -36,12 +33,107 @@ class GPU_IndexOp<string mnemonic, list<OpTrait> traits = []> :
   let verifier = [{ return ::verifyIndexOp(*this); }];
 }
 
-def GPU_BlockDimOp : GPU_IndexOp<"block_dim">;
-def GPU_BlockIdOp : GPU_IndexOp<"block_id">;
-def GPU_GridDimOp : GPU_IndexOp<"grid_dim">;
-def GPU_ThreadIdOp : GPU_IndexOp<"thread_id">;
+def GPU_BlockDimOp : GPU_IndexOp<"block_dim"> {
+  let description = [{
+    Returns the number of threads in the thread block (aka the block size) along
+    the x, y, or z `dimension`.
 
-def GPU_GPUFuncOp : GPU_Op<"func", [FunctionLike, IsolatedFromAbove, Symbol]> {
+    Example:
+
+    ```mlir
+    %bDimX = "gpu.block_dim"() {dimension = "x"} : () -> (index)
+    ```
+  }];
+}
+def GPU_BlockIdOp : GPU_IndexOp<"block_id"> {
+  let description = [{
+    Returns the block id, i.e. the index of the current block within the grid
+    along the x, y, or z `dimension`.
+
+    Example:
+
+    ```mlir
+    %bIdY = "gpu.block_id"() {dimension = "y"} : () -> (index)
+    ```
+  }];
+}
+def GPU_GridDimOp : GPU_IndexOp<"grid_dim"> {
+  let description = [{
+    Returns the number of thread blocks in the grid along the x, y, or z
+    `dimension`.
+
+    Example:
+
+    ```mlir
+    %gDimZ = "gpu.grid_dim"() {dimension = "z"} : () -> (index)
+    ```
+  }];
+}
+def GPU_ThreadIdOp : GPU_IndexOp<"thread_id"> {
+  let description = [{
+    Returns the thread id, i.e. the index of the current thread within the block
+    along the x, y, or z `dimension`.
+
+    Example:
+
+    ```mlir
+    %tIdX = "gpu.thread_id"() {dimension = "x"} : () -> (index)
+    ```
+  }];
+}
+
+def GPU_SubgroupIdOp : GPU_Op<"subgroup_id", [NoSideEffect]>,
+    Arguments<(ins)>, Results<(outs Index:$result)> {
+  let description = [{
+    Returns the subgroup id, i.e. the index of the current subgroup within the
+    workgroup.
+
+    Example:
+
+    ```mlir
+    %sgId = gpu.subgroup_id : index
+    ```
+  }];
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+  let verifier = [{ return success(); }];
+}
+
+def GPU_NumSubgroupsOp : GPU_Op<"num_subgroups", [NoSideEffect]>,
+    Arguments<(ins)>, Results<(outs Index:$result)> {
+  let description = [{
+    Returns the number of subgroups within a workgroup.
+
+    Example:
+
+    ```mlir
+    %numSg = gpu.num_subgroups : index
+    ```
+  }];
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+  let verifier = [{ return success(); }];
+}
+
+def GPU_SubgroupSizeOp : GPU_Op<"subgroup_size", [NoSideEffect]>,
+    Arguments<(ins)>, Results<(outs Index:$result)> {
+  let description = [{
+    Returns the number of threads within a subgroup.
+
+    Example:
+
+    ```mlir
+    %sgSz = gpu.subgroup_size : index
+    ```
+  }];
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+  let verifier = [{ return success(); }];
+}
+
+def GPU_GPUFuncOp : GPU_Op<"func", [HasParent<"GPUModuleOp">,
+                                    AutomaticAllocationScope, FunctionLike,
+                                    IsolatedFromAbove, Symbol]> {
   let summary = "Function executable on a GPU";
 
   let description = [{
@@ -107,22 +199,18 @@ def GPU_GPUFuncOp : GPU_Op<"func", [FunctionLike, IsolatedFromAbove, Symbol]> {
   let skipDefaultBuilders = 1;
 
   let builders = [
-    OpBuilder<"Builder *builder, OperationState &result, StringRef name, "
-              "FunctionType type, ArrayRef<Type> workgroupAttributions = {}, "
-              "ArrayRef<Type> privateAttributions = {}, "
-              "ArrayRef<NamedAttribute> attrs = {}">
+    OpBuilder<(ins "StringRef":$name, "FunctionType":$type,
+      CArg<"TypeRange", "{}">:$workgroupAttributions,
+      CArg<"TypeRange", "{}">:$privateAttributions,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>
   ];
 
   let extraClassDeclaration = [{
-    /// Adds a workgroup attribution of the MemRef type with the given shape and
-    /// element type.
-    Value addWorkgroupAttribution(ArrayRef<int64_t> shape, Type elementType);
-
     /// Returns `true` if the GPU function defined by this Op is a kernel, i.e.
     /// it is intended to be launched from host.
     bool isKernel() {
-      return getAttrOfType<UnitAttr>(GPUDialect::getKernelFuncAttrName()) !=
-             nullptr;
+      return (*this)->getAttrOfType<UnitAttr>(
+          GPUDialect::getKernelFuncAttrName()) != nullptr;
     }
 
     /// Change the type of this function in place. This is an extremely
@@ -132,43 +220,48 @@ def GPU_GPUFuncOp : GPU_Op<"func", [FunctionLike, IsolatedFromAbove, Symbol]> {
     ///  - the argument/result attributes may need an update: if the new type
     ///  has less parameters we drop the extra attributes, if there are more
     ///  parameters they won't have any attributes.
-    // TODO(b/146349912): consider removing this function thanks to rewrite
-    // patterns.
+    // TODO: consider removing this function thanks to rewrite patterns.
     void setType(FunctionType newType);
 
     /// Returns the number of buffers located in the workgroup memory.
     unsigned getNumWorkgroupAttributions() {
-      return getAttrOfType<IntegerAttr>(getNumWorkgroupAttributionsAttrName())
-          .getInt();
+      return (*this)->getAttrOfType<IntegerAttr>(
+          getNumWorkgroupAttributionsAttrName()).getInt();
     }
 
     /// Returns a list of block arguments that correspond to buffers located in
     /// the workgroup memory
     ArrayRef<BlockArgument> getWorkgroupAttributions() {
       auto begin =
-          std::next(getBody().front().args_begin(), getType().getNumInputs());
+          std::next(getBody().args_begin(), getType().getNumInputs());
       auto end = std::next(begin, getNumWorkgroupAttributions());
       return {begin, end};
     }
 
-    // Adds a new block argument that corresponds to buffers located in
-    // workgroup memory.
-    BlockArgument addWorkgroupAttribution(Type type) {
-      auto attrName = getNumWorkgroupAttributionsAttrName();
-      auto attr = getAttrOfType<IntegerAttr>(attrName);
-      setAttr(attrName, IntegerAttr::get(attr.getType(), attr.getValue() + 1));
-      return getBody().front().insertArgument(
-          getType().getNumInputs() + attr.getInt(), type);
+    /// Adds a new block argument that corresponds to buffers located in
+    /// workgroup memory.
+    BlockArgument addWorkgroupAttribution(Type type);
+
+    /// Returns the number of buffers located in the private memory.
+    unsigned getNumPrivateAttributions() {
+      return getBody().getNumArguments() - getType().getNumInputs() -
+          getNumWorkgroupAttributions();
     }
 
     /// Returns a list of block arguments that correspond to buffers located in
     /// the private memory.
     ArrayRef<BlockArgument> getPrivateAttributions() {
+      // Buffers on the private memory always come after buffers on the workgroup
+      // memory.
       auto begin =
-          std::next(getBody().front().args_begin(),
+          std::next(getBody().args_begin(),
                     getType().getNumInputs() + getNumWorkgroupAttributions());
-      return {begin, getBody().front().args_end()};
+      return {begin, getBody().args_end()};
     }
+
+    /// Adds a new block argument that corresponds to buffers located in
+    /// private memory.
+    BlockArgument addPrivateAttribution(Type type);
 
     /// Returns the name of the attribute containing the number of buffers
     /// located in the workgroup memory.
@@ -200,13 +293,15 @@ def GPU_GPUFuncOp : GPU_Op<"func", [FunctionLike, IsolatedFromAbove, Symbol]> {
   let parser = [{ return parseGPUFuncOp(parser, result); }];
 }
 
-def GPU_LaunchFuncOp : GPU_Op<"launch_func">,
-    Arguments<(ins IntLikeOrLLVMInt:$gridSizeX, IntLikeOrLLVMInt:$gridSizeY,
-               IntLikeOrLLVMInt:$gridSizeZ, IntLikeOrLLVMInt:$blockSizeX,
-               IntLikeOrLLVMInt:$blockSizeY, IntLikeOrLLVMInt:$blockSizeZ,
+def GPU_LaunchFuncOp : GPU_Op<"launch_func",
+                              [GPU_AsyncOpInterface, AttrSizedOperandSegments]>,
+    Arguments<(ins Variadic<GPU_AsyncToken>:$asyncDependencies,
+               SymbolRefAttr:$kernel,
+               Index:$gridSizeX, Index:$gridSizeY, Index:$gridSizeZ,
+               Index:$blockSizeX, Index:$blockSizeY, Index:$blockSizeZ,
                Variadic<AnyType>:$operands)>,
-    Results<(outs)> {
-  let summary = "Launches a function as a GPU kerneel";
+    Results<(outs Optional<GPU_AsyncToken>:$asyncToken)> {
+  let summary = "Launches a function as a GPU kernel";
 
   let description = [{
     Launch a kernel function on the specified grid of thread blocks.
@@ -214,21 +309,25 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func">,
     outlining the kernel body into a function in a dedicated module, which
     reflects the separate compilation process. The kernel function is required
     to have the `gpu.kernel` attribute. The module containing the kernel
-    function is required to have the `gpu.kernel_module` attribute and must be
-    named. And finally, the module containing the kernel module (which thus
-    cannot be the top-level module) is required to have the
-    `gpu.container_module` attribute. The `gpu.launch_func` operation has a
-    string attribute named `kernel` to specify the name of the kernel function
-    to launch and an attribute named `kernel_module` to specify the name of the
-    module containing that kernel function.
+    function is required to be a gpu.module. And finally, the module containing
+    the kernel module (which thus cannot be the top-level module) is required
+    to have the `gpu.container_module` attribute. The `gpu.launch_func`
+    operation has a symbol attribute named `kernel` to identify the fully
+    specified kernel function to launch (both the gpu.module and func).
 
-    The operation takes at least six operands, with the first three operands
-    being grid sizes along x,y,z dimensions and the following three being block
-    sizes along x,y,z dimensions. When a lower-dimensional kernel is required,
-    unused sizes must be explicitly set to `1`. The remaining operands are
-    passed as arguments to the kernel function.
+    The `gpu.launch_func` supports async dependencies: the kernel does not start
+    executing until the ops producing those async dependencies have completed.
 
-    A custom syntax for this operation is currently not available.
+    By the default, the host implicitly blocks until kernel execution has
+    completed. If the `async` keyword is present, the host does not block but
+    instead a `!gpu.async.token` is returned. Other async GPU ops can take this
+    token as dependency.
+
+    The operation requires at least the grid and block sizes along the x,y,z
+    dimensions as arguments. When a lower-dimensional kernel is required,
+    unused sizes must be explicitly set to `1`.
+
+    The remaining operands are passed as arguments to the kernel function.
 
     Example:
 
@@ -236,8 +335,8 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func">,
     module attributes {gpu.container_module} {
 
       // This module creates a separate compilation unit for the GPU compiler.
-      module @kernels attributes {gpu.kernel_module} {
-        func @kernel_1(%arg0 : f32, %arg1 : !llvm<"float*">)
+      gpu.module @kernels {
+        func @kernel_1(%arg0 : f32, %arg1 : memref<?xf32, 1>)
             attributes { nvvm.kernel = true } {
 
           // Operations that produce block/thread IDs and dimensions are
@@ -264,13 +363,15 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func">,
         }
       }
 
-      "gpu.launch_func"(%cst, %cst, %cst,  // Grid sizes.
-                        %cst, %cst, %cst,  // Block sizes.
-                        %arg0, %arg1)      // Arguments passed to the kernel.
-            { kernel_module = @kernels,    // Module containing the kernel.
-              kernel = "kernel_1" }        // Kernel function.
-            : (index, index, index, index, index, index, f32, !llvm<"float*">)
-              -> ()
+      %t0 = gpu.wait async
+      gpu.launch_func
+          async                           // (Optional) Don't block host, return token.
+          [%t0]                           // (Optional) Execute only after %t0 has completed.
+          @kernels::@kernel_1             // Kernel function.
+          blocks in (%cst, %cst, %cst)    // Grid size.
+          threads in (%cst, %cst, %cst)   // Block size.
+          args(%arg0 : f32,               // (Optional) Kernel arguments.
+               %arg1 : memref<?xf32, 1>)
     }
     ```
   }];
@@ -278,25 +379,19 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func">,
   let skipDefaultBuilders = 1;
 
   let builders = [
-    OpBuilder<"Builder *builder, OperationState &result, GPUFuncOp kernelFunc, "
-              "Value gridSizeX, Value gridSizeY, Value gridSizeZ, "
-              "Value blockSizeX, Value blockSizeY, Value blockSizeZ, "
-              "ValueRange kernelOperands">,
-    OpBuilder<"Builder *builder, OperationState &result, GPUFuncOp kernelFunc, "
-              "KernelDim3 gridSize, KernelDim3 blockSize, "
-              "ValueRange kernelOperands">
+    OpBuilder<(ins "GPUFuncOp":$kernelFunc, "KernelDim3":$gridSize,
+      "KernelDim3":$blockSize, "ValueRange":$kernelOperands)>
   ];
 
   let extraClassDeclaration = [{
-    /// The kernel function specified by the operation's `kernel` attribute.
-    StringRef kernel();
-
     /// The number of operands passed to the kernel function.
     unsigned getNumKernelOperands();
 
-    /// The name of the kernel module specified by the operation's
-    /// `kernel_module` attribute.
+    /// The name of the kernel's containing module.
     StringRef getKernelModuleName();
+
+    /// The name of the kernel.
+    StringRef getKernelName();
 
     /// The i-th operand passed to the kernel function.
     Value getKernelOperand(unsigned i);
@@ -316,15 +411,19 @@ def GPU_LaunchFuncOp : GPU_Op<"launch_func">,
     friend LogicalResult GPUDialect::verifyOperationAttribute(Operation *,
                                                               NamedAttribute);
 
-    /// The name of the symbolRef attribute specifying the kernel to launch.
+    /// The name of the symbol reference attribute specifying the kernel to launch.
     static StringRef getKernelAttrName() { return "kernel"; }
-
-    /// The name of the symbolRef attribute specifying the name of the module
-    /// containing the kernel to launch.
-    static StringRef getKernelModuleAttrName() { return "kernel_module"; }
   }];
 
   let verifier = [{ return ::verify(*this); }];
+  let assemblyFormat = [{
+      custom<AsyncDependencies>(type($asyncToken), $asyncDependencies)
+      $kernel
+      `blocks` `in` ` ` `(`$gridSizeX`,` $gridSizeY`,` $gridSizeZ`)`
+      `threads` `in` ` ` `(`$blockSizeX`,` $blockSizeY`,` $blockSizeZ`)`
+      custom<LaunchFuncOperands>($operands, type($operands))
+      attr-dict
+  }];
 }
 
 def GPU_LaunchOp : GPU_Op<"launch">,
@@ -383,7 +482,7 @@ def GPU_LaunchOp : GPU_Op<"launch">,
          %num_bx : index, %num_by : index, %num_bz : index,
          %num_tx : index, %num_ty : index, %num_tz : index)
       "some_op"(%bx, %tx) : (index, index) -> ()
-      %3 = "std.load"(%val1, %bx) : (memref<?xf32, 1>, index) -> f32
+      %3 = "memref.load"(%val1, %bx) : (memref<?xf32, 1>, index) -> f32
     }
     ```
 
@@ -399,9 +498,9 @@ def GPU_LaunchOp : GPU_Op<"launch">,
   let skipDefaultBuilders = 1;
 
   let builders = [
-    OpBuilder<"Builder *builder, OperationState &result, Value gridSizeX,"
-              "Value gridSizeY, Value gridSizeZ, Value blockSizeX,"
-              "Value blockSizeY, Value blockSizeZ">
+    OpBuilder<(ins "Value":$gridSizeX, "Value":$gridSizeY,
+      "Value":$gridSizeZ, "Value":$blockSizeX, "Value":$blockSizeY,
+      "Value":$blockSizeZ)>
   ];
 
   let extraClassDeclaration = [{
@@ -443,10 +542,10 @@ def GPU_ReturnOp : GPU_Op<"return", [HasParent<"GPUFuncOp">, NoSideEffect,
   let description = [{
     A terminator operation for regions that appear in the body of  `gpu.func`
     functions. The operands to the `gpu.return` are the result values returned
-    by an incovation of the `gpu.func`.
+    by an invocation of the `gpu.func`.
   }];
 
-  let builders = [OpBuilder<"Builder *builder, OperationState &result", " // empty">];
+  let builders = [OpBuilder<(ins), [{ // empty}]>];
 
   let parser = [{ return parseReturnOp(parser, result); }];
   let printer = [{ p << getOperationName(); }];
@@ -471,13 +570,14 @@ def GPU_YieldOp : GPU_Op<"yield", [NoSideEffect, Terminator]>,
     Arguments<(ins Variadic<AnyType>:$values)> {
   let summary = "GPU yield operation";
   let description = [{
-    "gpu.yield" is a special terminator operation for blocks inside regions
+    gpu.yield` is a special terminator operation for blocks inside regions
     in gpu ops. It returns values to the immediately enclosing gpu op.
 
     Example:
 
-       ```gpu.yield %f0, %f1 : f32, f32
-       ```
+    ```mlir
+    gpu.yield %f0, %f1 : f32, f32
+    ```
   }];
 }
 
@@ -509,18 +609,20 @@ def GPU_AllReduceOp : GPU_Op<"all_reduce",
     Results<(outs AnyType)> {
   let summary = "Reduce values among workgroup.";
   let description = [{
-    The "all_reduce" op reduces the value of every work item across a local
+    The `all_reduce` op reduces the value of every work item across a local
     workgroup. The result is equal for all work items of a workgroup.
 
     For example, both
+
+    ```mlir
+    %1 = "gpu.all_reduce"(%0) ({}) { op = "add" } : (f32) -> (f32)
+    %2 = "gpu.all_reduce"(%0) ({
+    ^bb(%lhs : f32, %rhs : f32):
+      %sum = addf %lhs, %rhs : f32
+      "gpu.yield"(%sum) : (f32) -> ()
+    }) : (f32) -> (f32)
     ```
-      %1 = "gpu.all_reduce"(%0) ({}) { op = "add" } : (f32) -> (f32)
-      %2 = "gpu.all_reduce"(%0) ({
-      ^bb(%lhs : f32, %rhs : f32):
-        %sum = addf %lhs, %rhs : f32
-        "gpu.yield"(%sum) : (f32) -> ()
-      }) : (f32) -> (f32)
-    ```
+
     compute the sum of each work item's %0 value. The first version specifies
     the accumulation as operation, whereas the second version specifies the
     accumulation as code region. The accumulation operation must be one of:
@@ -550,11 +652,13 @@ def GPU_ShuffleOp : GPU_Op<"shuffle", [NoSideEffect]>,
     The "shuffle" op moves values to a different invocation within the same
     subgroup.
 
-    For example
+    Example:
+
+    ```mlir
+    %1, %2 = gpu.shuffle %0, %offset, %width xor : f32
     ```
-      %1, %2 = gpu.shuffle %0, %offset, %width xor : f32
-    ```
-    for lane k returns the value from lane `k ^ offset` and `true` if that lane
+
+    For lane k returns the value from lane `k ^ offset` and `true` if that lane
     is smaller than %width. Otherwise it returns an unspecified value and
     `false`. A lane is the index of an invocation relative to its subgroup.
 
@@ -574,9 +678,10 @@ def GPU_BarrierOp : GPU_Op<"barrier"> {
     The "barrier" op synchronizes all work items of a workgroup. It is used
     to coordinate communication between the work items of the workgroup.
 
+    ```mlir
+    gpu.barrier
     ```
-      gpu.barrier
-    ```
+
     waits until all work items in the workgroup have reached this point
     and all memory accesses made by these work items prior to the op are
     visible to all work items in the workgroup. Data hazards between work items
@@ -591,7 +696,8 @@ def GPU_BarrierOp : GPU_Op<"barrier"> {
 }
 
 def GPU_GPUModuleOp : GPU_Op<"module", [
-  IsolatedFromAbove, SymbolTable, Symbol,
+  DataLayoutOpInterface, HasDefaultDLTIDataLayout, IsolatedFromAbove,
+  SymbolTable, Symbol,
   SingleBlockImplicitTerminator<"ModuleEndOp">
 ]> {
   let summary = "A top level compilation unit containing code to be run on a GPU.";
@@ -619,8 +725,7 @@ def GPU_GPUModuleOp : GPU_Op<"module", [
 
     ```
   }];
-  let builders = [OpBuilder<"Builder *builder, OperationState &result, "
-                            "StringRef name">];
+  let builders = [OpBuilder<(ins "StringRef":$name)>];
   let parser = [{ return ::parseGPUModuleOp(parser, result); }];
   let printer = [{ return ::print(p, *this); }];
   let regions = (region SizedRegion<1>:$body);
@@ -640,6 +745,171 @@ def GPU_ModuleEndOp : GPU_Op<"module_end", [
 
   let parser = [{ return success(); }];
   let printer = [{ p << getOperationName(); }];
+}
+
+def GPU_HostRegisterOp : GPU_Op<"host_register">,
+    Arguments<(ins AnyUnrankedMemRef:$value)> {
+  let summary = "Registers a memref for access from device.";
+  let description = [{
+    This op maps the provided host buffer into the device address space.
+
+    This operation may not be supported in every environment, there is not yet a
+    way to check at runtime whether this feature is supported.
+
+    Writes from the host are guaranteed to be visible to device kernels that are
+    launched afterwards. Writes from the device are guaranteed to be visible on
+    the host after synchronizing with the device kernel completion.
+  }];
+
+  let assemblyFormat = "$value attr-dict `:` type($value)";
+  let verifier = [{ return success(); }];
+}
+
+def GPU_WaitOp : GPU_Op<"wait", [GPU_AsyncOpInterface]> {
+  let summary = "Wait for async gpu ops to complete.";
+  let description = [{
+    This op synchronizes the host or the device with a list of dependent ops.
+
+    If the op contains the `async` keyword, it returns a new async token which
+    is synchronized with the op arguments. This new token is merely a shortcut
+    to the argument list, and one could replace the uses of the result with the
+    arguments for the same effect. The async version of this op is primarily
+    used to make each async token have a single use during lowering and
+    thereby make forks in async execution explicit. Example usage:
+
+    ```mlir
+    %t0 = gpu.foo async : !gpu.async.token
+    %t1 = gpu.bar async : !gpu.async.token
+    %t2 = gpu.wait async [%t0, %t1]
+    // gpu.baz doesn't run until gpu.foo and gpu.bar have both completed, just
+    // as if the async dependencies were [%t0, %t1].
+    %t3 = gpu.baz async [%t2]
+    ```
+
+    If the op does not contain the `async` keyword, it does not return a new
+    async token but blocks until all ops producing the async dependency tokens
+    finished execution. All dependent memory operations are visible to the host
+    once this op completes. Example usage:
+
+    ```mlir
+    %t0 = gpu.foo async : !gpu.async.token
+    %t1 = gpu.bar async : !gpu.async.token
+    // The gpu.wait op blocks until gpu.foo and gpu.bar have completed.
+    gpu.wait [%t0, %t1]
+    ```
+  }];
+
+  let arguments = (ins Variadic<GPU_AsyncToken>:$asyncDependencies);
+  let results = (outs Optional<GPU_AsyncToken>:$asyncToken);
+
+  let assemblyFormat = [{
+    custom<AsyncDependencies>(type($asyncToken), $asyncDependencies) attr-dict
+  }];
+}
+
+def GPU_AllocOp : GPU_Op<"alloc", [
+    GPU_AsyncOpInterface,
+    AttrSizedOperandSegments
+  ]> {
+
+  let summary = "GPU memory allocation operation.";
+  let description = [{
+    The `gpu.alloc` operation allocates a region of memory on the GPU. It is
+    similar to the `memref.alloc` op, but supports asynchronous GPU execution.
+
+    The op does not execute before all async dependencies have finished
+    executing.
+
+    If the `async` keyword is present, the op is executed asynchronously (i.e.
+    it does not block until the execution has finished on the device). In
+    that case, it also returns a !gpu.async.token.
+
+    Example:
+
+    ```mlir
+    %memref, %token = gpu.alloc async [%dep] (%width) : memref<64x?xf32, 1>
+    ```
+  }];
+
+  let arguments = (ins Variadic<GPU_AsyncToken>:$asyncDependencies,
+                   Variadic<Index>:$dynamicSizes, Variadic<Index>:$symbolOperands);
+  let results = (outs Res<AnyMemRef, "", [MemAlloc]>:$memref,
+                 Optional<GPU_AsyncToken>:$asyncToken);
+
+  let extraClassDeclaration = [{
+    MemRefType getType() { return memref().getType().cast<MemRefType>(); }
+  }];
+
+  let assemblyFormat = [{
+    custom<AsyncDependencies>(type($asyncToken), $asyncDependencies) ` `
+    `(` $dynamicSizes `)` (`` `[` $symbolOperands^ `]`)? attr-dict `:` type($memref)
+  }];
+}
+
+def GPU_DeallocOp : GPU_Op<"dealloc", [GPU_AsyncOpInterface]> {
+
+  let summary = "GPU memory deallocation operation";
+
+  let description = [{
+    The `gpu.dealloc` operation frees the region of memory referenced by a
+    memref which was originally created by the `gpu.alloc` operation. It is
+    similar to the `memref.dealloc` op, but supports asynchronous GPU execution.
+
+    The op does not execute before all async dependencies have finished
+    executing.
+
+    If the `async` keyword is present, the op is executed asynchronously (i.e.
+    it does not block until the execution has finished on the device). In
+    that case, it returns a !gpu.async.token.
+
+    Example:
+
+    ```mlir
+    %token = gpu.dealloc async [%dep] %memref : memref<8x64xf32, 1>
+    ```
+  }];
+
+  let arguments = (ins Variadic<GPU_AsyncToken>:$asyncDependencies,
+                   Arg<AnyMemRef, "", [MemFree]>:$memref);
+  let results = (outs Optional<GPU_AsyncToken>:$asyncToken);
+
+  let assemblyFormat = [{
+    custom<AsyncDependencies>(type($asyncToken), $asyncDependencies)
+    $memref attr-dict `:` type($memref)
+  }];
+}
+
+def GPU_MemcpyOp : GPU_Op<"memcpy", [GPU_AsyncOpInterface]> {
+
+  let summary = "GPU memcpy operation";
+
+  let description = [{
+    The `gpu.memcpy` operation copies the content of one memref to another.
+
+    The op does not execute before all async dependencies have finished
+    executing.
+
+    If the `async` keyword is present, the op is executed asynchronously (i.e.
+    it does not block until the execution has finished on the device). In
+    that case, it returns a !gpu.async.token.
+
+    Example:
+
+    ```mlir
+    %token = gpu.memcpy async [%dep] %dst, %src : memref<?xf32, 1>, memref<?xf32>
+    ```
+  }];
+
+  let arguments = (ins Variadic<GPU_AsyncToken>:$asyncDependencies,
+                   Arg<AnyMemRef, "", [MemWrite]>:$dst,
+                   Arg<AnyMemRef, "", [MemRead]>:$src);
+  let results = (outs Optional<GPU_AsyncToken>:$asyncToken);
+
+  let assemblyFormat = [{
+    custom<AsyncDependencies>(type($asyncToken), $asyncDependencies)
+    $dst`,` $src `:` type($dst)`,` type($src) attr-dict
+  }];
+  let verifier = [{ return ::verify(*this); }];
 }
 
 #endif // GPU_OPS

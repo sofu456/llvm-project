@@ -50,9 +50,6 @@ enum NodeType : unsigned {
   // as a register base.
   PCREL_OFFSET,
 
-  // Integer absolute.
-  IABS,
-
   // Integer comparisons.  There are three operands: the two values
   // to compare, and an integer of type SystemZICMP.
   ICMP,
@@ -82,6 +79,10 @@ enum NodeType : unsigned {
   // Evaluates to the gap between the stack pointer and the
   // base of the dynamically-allocatable area.
   ADJDYNALLOC,
+
+  // For allocating stack space when using stack clash protector.
+  // Allocation is performed by block, and each block is probed.
+  PROBED_ALLOCA,
 
   // Count number of bits set in operand 0 per byte.
   POPCNT,
@@ -428,13 +429,13 @@ public:
                                   EVT VT) const override;
   bool isFPImmLegal(const APFloat &Imm, EVT VT,
                     bool ForCodeSize) const override;
+  bool hasInlineStackProbe(MachineFunction &MF) const override;
   bool isLegalICmpImmediate(int64_t Imm) const override;
   bool isLegalAddImmediate(int64_t Imm) const override;
   bool isLegalAddressingMode(const DataLayout &DL, const AddrMode &AM, Type *Ty,
                              unsigned AS,
                              Instruction *I = nullptr) const override;
-  bool allowsMisalignedMemoryAccesses(EVT VT, unsigned AS,
-                                      unsigned Align,
+  bool allowsMisalignedMemoryAccesses(EVT VT, unsigned AS, Align Alignment,
                                       MachineMemOperand::Flags Flags,
                                       bool *Fast) const override;
   bool isTruncateFree(Type *, Type *) const override;
@@ -486,14 +487,14 @@ public:
 
   /// If a physical register, this returns the register that receives the
   /// exception address on entry to an EH pad.
-  unsigned
+  Register
   getExceptionPointerRegister(const Constant *PersonalityFn) const override {
     return SystemZ::R6D;
   }
 
   /// If a physical register, this returns the register that receives the
   /// exception typeid on entry to a landing pad.
-  unsigned
+  Register
   getExceptionSelectorRegister(const Constant *PersonalityFn) const override {
     return SystemZ::R7D;
   }
@@ -549,12 +550,17 @@ public:
                                            unsigned Depth) const override;
 
   ISD::NodeType getExtendForAtomicOps() const override {
-    return ISD::ANY_EXTEND;
+    return ISD::ZERO_EXTEND;
+  }
+  ISD::NodeType getExtendForAtomicCmpSwapArg() const override {
+    return ISD::ZERO_EXTEND;
   }
 
   bool supportSwiftError() const override {
     return true;
   }
+
+  unsigned getStackProbeSize(MachineFunction &MF) const;
 
 private:
   const SystemZSubtarget &Subtarget;
@@ -620,8 +626,8 @@ private:
   SDValue lowerSCALAR_TO_VECTOR(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerINSERT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerEXTRACT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const;
-  SDValue lowerExtendVectorInreg(SDValue Op, SelectionDAG &DAG,
-                                 unsigned UnpackHigh) const;
+  SDValue lowerSIGN_EXTEND_VECTOR_INREG(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerZERO_EXTEND_VECTOR_INREG(SDValue Op, SelectionDAG &DAG) const;
   SDValue lowerShift(SDValue Op, SelectionDAG &DAG, unsigned ByScalar) const;
 
   bool canTreatAsByteVector(EVT VT) const;
@@ -648,6 +654,7 @@ private:
   SDValue combineSELECT_CCMASK(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue combineGET_CCMASK(SDNode *N, DAGCombinerInfo &DCI) const;
   SDValue combineIntDIVREM(SDNode *N, DAGCombinerInfo &DCI) const;
+  SDValue combineINTRINSIC(SDNode *N, DAGCombinerInfo &DCI) const;
 
   SDValue unwrapAddress(SDValue N) const override;
 
@@ -690,6 +697,10 @@ private:
   MachineBasicBlock *emitLoadAndTestCmp0(MachineInstr &MI,
                                          MachineBasicBlock *MBB,
                                          unsigned Opcode) const;
+  MachineBasicBlock *emitProbedAlloca(MachineInstr &MI,
+                                      MachineBasicBlock *MBB) const;
+
+  SDValue getBackchainAddress(SDValue SP, SelectionDAG &DAG) const;
 
   MachineMemOperand::Flags
   getTargetMMOFlags(const Instruction &I) const override;

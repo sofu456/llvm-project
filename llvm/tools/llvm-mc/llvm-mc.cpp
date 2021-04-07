@@ -169,6 +169,14 @@ static cl::opt<bool> LexMasmIntegers(
     "masm-integers",
     cl::desc("Enable binary and hex masm integers (0b110 and 0ABCh)"));
 
+static cl::opt<bool> LexMasmHexFloats(
+    "masm-hexfloats",
+    cl::desc("Enable MASM-style hex float initializers (3F800000r)"));
+
+static cl::opt<bool> LexMotorolaIntegers(
+    "motorola-integers",
+    cl::desc("Enable binary and hex Motorola integers (%110 and $ABC)"));
+
 static cl::opt<bool> NoExecStack("no-exec-stack",
                                  cl::desc("File doesn't need an exec stack"));
 
@@ -300,6 +308,8 @@ static int AssembleInput(const char *ProgName, const Target *TheTarget,
   Parser->setShowParsedOperands(ShowInstOperands);
   Parser->setTargetParser(*TAP);
   Parser->getLexer().setLexMasmIntegers(LexMasmIntegers);
+  Parser->getLexer().setLexMasmHexFloats(LexMasmHexFloats);
+  Parser->getLexer().setLexMotorolaIntegers(LexMotorolaIntegers);
 
   int Res = Parser->Run(NoInitialTextSection);
 
@@ -387,6 +397,31 @@ int main(int argc, char **argv) {
     return 1;
   }
   Ctx.setDwarfVersion(DwarfVersion);
+  if (MCOptions.Dwarf64) {
+    // The 64-bit DWARF format was introduced in DWARFv3.
+    if (DwarfVersion < 3) {
+      errs() << ProgName
+             << ": the 64-bit DWARF format is not supported for DWARF versions "
+                "prior to 3\n";
+      return 1;
+    }
+    // 32-bit targets don't support DWARF64, which requires 64-bit relocations.
+    if (MAI->getCodePointerSize() < 8) {
+      errs() << ProgName
+             << ": the 64-bit DWARF format is only supported for 64-bit "
+                "targets\n";
+      return 1;
+    }
+    // If needsDwarfSectionOffsetDirective is true, we would eventually call
+    // MCStreamer::emitSymbolValue() with IsSectionRelative = true, but that
+    // is supported only for 4-byte long references.
+    if (MAI->needsDwarfSectionOffsetDirective()) {
+      errs() << ProgName << ": the 64-bit DWARF format is not supported for "
+             << TheTriple.normalize() << "\n";
+      return 1;
+    }
+    Ctx.setDwarfFormat(dwarf::DWARF64);
+  }
   if (!DwarfDebugFlags.empty())
     Ctx.setDwarfDebugFlags(StringRef(DwarfDebugFlags));
   if (!DwarfDebugProducer.empty())
@@ -417,8 +452,9 @@ int main(int argc, char **argv) {
     FeaturesStr = Features.getString();
   }
 
-  sys::fs::OpenFlags Flags = (FileType == OFT_AssemblyFile) ? sys::fs::OF_Text
-                                                            : sys::fs::OF_None;
+  sys::fs::OpenFlags Flags = (FileType == OFT_AssemblyFile)
+                                 ? sys::fs::OF_TextWithCRLF
+                                 : sys::fs::OF_None;
   std::unique_ptr<ToolOutputFile> Out = GetOutputStream(OutputFilename, Flags);
   if (!Out)
     return 1;
@@ -439,8 +475,11 @@ int main(int argc, char **argv) {
   std::unique_ptr<MCStreamer> Str;
 
   std::unique_ptr<MCInstrInfo> MCII(TheTarget->createMCInstrInfo());
+  assert(MCII && "Unable to create instruction info!");
+
   std::unique_ptr<MCSubtargetInfo> STI(
       TheTarget->createMCSubtargetInfo(TripleName, MCPU, FeaturesStr));
+  assert(STI && "Unable to create subtarget info!");
 
   MCInstPrinter *IP = nullptr;
   if (FileType == OFT_AssemblyFile) {

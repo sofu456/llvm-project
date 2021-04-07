@@ -110,7 +110,7 @@ bool ARMAsmPrinter::lowerOperand(const MachineOperand &MO,
     APFloat Val = MO.getFPImm()->getValueAPF();
     bool ignored;
     Val.convert(APFloat::IEEEdouble(), APFloat::rmTowardZero, &ignored);
-    MCOp = MCOperand::createFPImm(Val.convertToDouble());
+    MCOp = MCOperand::createDFPImm(bit_cast<uint64_t>(Val.convertToDouble()));
     break;
   }
   case MachineOperand::MO_RegisterMask:
@@ -210,7 +210,7 @@ void ARMAsmPrinter::EmitSled(const MachineInstr &MI, SledKind Kind)
   emitNops(NoopsInSledCount);
 
   OutStreamer->emitLabel(Target);
-  recordSled(CurSled, MI, Kind);
+  recordSled(CurSled, MI, Kind, 2);
 }
 
 void ARMAsmPrinter::LowerPATCHABLE_FUNCTION_ENTER(const MachineInstr &MI)

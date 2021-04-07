@@ -77,6 +77,9 @@ void LogThreadStopInfo(Log &log, const ThreadStopInfo &stop_info,
   case eStopReasonInstrumentation:
     log.Printf("%s: %s instrumentation", __FUNCTION__, header);
     return;
+  case eStopReasonProcessorTrace:
+    log.Printf("%s: %s processor trace", __FUNCTION__, header);
+    return;
   default:
     log.Printf("%s: %s invalid stop reason %" PRIu32, __FUNCTION__, header,
                static_cast<uint32_t>(stop_info.reason));
@@ -241,9 +244,6 @@ Status NativeThreadLinux::Resume(uint32_t signo) {
   if (signo != LLDB_INVALID_SIGNAL_NUMBER)
     data = signo;
 
-  // Before thread resumes, clear any cached register data structures
-  GetRegisterContext().InvalidateAllRegisters();
-
   return NativeProcessLinux::PtraceWrapper(PTRACE_CONT, GetID(), nullptr,
                                            reinterpret_cast<void *>(data));
 }
@@ -264,9 +264,6 @@ Status NativeThreadLinux::SingleStep(uint32_t signo) {
   intptr_t data = 0;
   if (signo != LLDB_INVALID_SIGNAL_NUMBER)
     data = signo;
-
-  // Before thread resumes, clear any cached register data structures
-  GetRegisterContext().InvalidateAllRegisters();
 
   // If hardware single-stepping is not supported, we just do a continue. The
   // breakpoint on the next instruction has been setup in
@@ -324,6 +321,9 @@ bool NativeThreadLinux::IsStopped(int *signo) {
 void NativeThreadLinux::SetStopped() {
   if (m_state == StateType::eStateStepping)
     m_step_workaround.reset();
+
+  // On every stop, clear any cached register data structures
+  GetRegisterContext().InvalidateAllRegisters();
 
   const StateType new_state = StateType::eStateStopped;
   MaybeLogStateChange(new_state);
@@ -399,6 +399,15 @@ void NativeThreadLinux::SetStoppedWithNoReason() {
 
   m_stop_info.reason = StopReason::eStopReasonNone;
   m_stop_info.details.signal.signo = 0;
+}
+
+void NativeThreadLinux::SetStoppedByProcessorTrace(
+    llvm::StringRef description) {
+  SetStopped();
+
+  m_stop_info.reason = StopReason::eStopReasonProcessorTrace;
+  m_stop_info.details.signal.signo = 0;
+  m_stop_description = description.str();
 }
 
 void NativeThreadLinux::SetExited() {

@@ -14,12 +14,21 @@
 using namespace lldb;
 using namespace lldb_private;
 
-static void DumpStringToStreamWithNewline(Stream &strm, const std::string &s,
-                                          bool add_newline_if_empty) {
+static llvm::raw_ostream &error(Stream &strm) {
+  return llvm::WithColor(strm.AsRawOstream(), llvm::HighlightColor::Error,
+                         llvm::ColorMode::Enable)
+         << "error: ";
+}
+
+static llvm::raw_ostream &warning(Stream &strm) {
+  return llvm::WithColor(strm.AsRawOstream(), llvm::HighlightColor::Warning,
+                         llvm::ColorMode::Enable)
+         << "warning: ";
+}
+
+static void DumpStringToStreamWithNewline(Stream &strm, const std::string &s) {
   bool add_newline = false;
-  if (s.empty()) {
-    add_newline = add_newline_if_empty;
-  } else {
+  if (!s.empty()) {
     // We already checked for empty above, now make sure there is a newline in
     // the error, and if there isn't one, add one.
     strm.Write(s.c_str(), s.size());
@@ -31,11 +40,10 @@ static void DumpStringToStreamWithNewline(Stream &strm, const std::string &s,
     strm.EOL();
 }
 
-CommandReturnObject::CommandReturnObject()
-    : m_out_stream(), m_err_stream(), m_status(eReturnStatusStarted),
-      m_did_change_process_state(false), m_interactive(true) {}
-
-CommandReturnObject::~CommandReturnObject() {}
+CommandReturnObject::CommandReturnObject(bool colors)
+    : m_out_stream(colors), m_err_stream(colors),
+      m_status(eReturnStatusStarted), m_did_change_process_state(false),
+      m_interactive(true) {}
 
 void CommandReturnObject::AppendErrorWithFormat(const char *format, ...) {
   if (!format)
@@ -48,9 +56,8 @@ void CommandReturnObject::AppendErrorWithFormat(const char *format, ...) {
 
   const std::string &s = std::string(sstrm.GetString());
   if (!s.empty()) {
-    Stream &error_strm = GetErrorStream();
-    error_strm.PutCString("error: ");
-    DumpStringToStreamWithNewline(error_strm, s, false);
+    error(GetErrorStream());
+    DumpStringToStreamWithNewline(GetErrorStream(), s);
   }
 }
 
@@ -75,34 +82,25 @@ void CommandReturnObject::AppendWarningWithFormat(const char *format, ...) {
   sstrm.PrintfVarArg(format, args);
   va_end(args);
 
-  GetErrorStream() << "warning: " << sstrm.GetString();
+  warning(GetErrorStream()) << sstrm.GetString();
 }
 
 void CommandReturnObject::AppendMessage(llvm::StringRef in_string) {
   if (in_string.empty())
     return;
-  GetOutputStream() << in_string << "\n";
+  GetOutputStream() << in_string.rtrim() << '\n';
 }
 
 void CommandReturnObject::AppendWarning(llvm::StringRef in_string) {
   if (in_string.empty())
     return;
-  GetErrorStream() << "warning: " << in_string << "\n";
-}
-
-// Similar to AppendWarning, but do not prepend 'warning: ' to message, and
-// don't append "\n" to the end of it.
-
-void CommandReturnObject::AppendRawWarning(llvm::StringRef in_string) {
-  if (in_string.empty())
-    return;
-  GetErrorStream() << in_string;
+  warning(GetErrorStream()) << in_string.rtrim() << '\n';
 }
 
 void CommandReturnObject::AppendError(llvm::StringRef in_string) {
   if (in_string.empty())
     return;
-  GetErrorStream() << "error: " << in_string << "\n";
+  error(GetErrorStream()) << in_string.rtrim() << '\n';
 }
 
 void CommandReturnObject::SetError(const Status &error,

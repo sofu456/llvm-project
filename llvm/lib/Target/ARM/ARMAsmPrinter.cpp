@@ -73,6 +73,16 @@ void ARMAsmPrinter::emitFunctionEntryLabel() {
   } else {
     OutStreamer->emitAssemblerFlag(MCAF_Code32);
   }
+
+  // Emit symbol for CMSE non-secure entry point
+  if (AFI->isCmseNSEntryFunction()) {
+    MCSymbol *S =
+        OutContext.getOrCreateSymbol("__acle_se_" + CurrentFnSym->getName());
+    emitLinkage(&MF->getFunction(), S);
+    OutStreamer->emitSymbolAttribute(S, MCSA_ELF_TypeFunction);
+    OutStreamer->emitLabel(S);
+  }
+
   OutStreamer->emitLabel(CurrentFnSym);
 }
 
@@ -275,7 +285,7 @@ bool ARMAsmPrinter::PrintAsmOperand(const MachineInstr *MI, unsigned OpNum,
       return false;
     case 'y': // Print a VFP single precision register as indexed double.
       if (MI->getOperand(OpNum).isReg()) {
-        Register Reg = MI->getOperand(OpNum).getReg();
+        MCRegister Reg = MI->getOperand(OpNum).getReg().asMCReg();
         const TargetRegisterInfo *TRI = MF->getSubtarget().getRegisterInfo();
         // Find the 'd' register that has this 's' register as a sub-register,
         // and determine the lane number.
@@ -652,16 +662,13 @@ void ARMAsmPrinter::emitAttributes() {
   }
 
   // Set FP Denormals.
-  if (checkDenormalAttributeConsistency(*MMI->getModule(),
-                                        "denormal-fp-math",
-                                        DenormalMode::getPreserveSign()) ||
-      TM.Options.FPDenormalMode == FPDenormal::PreserveSign)
+  if (checkDenormalAttributeConsistency(*MMI->getModule(), "denormal-fp-math",
+                                        DenormalMode::getPreserveSign()))
     ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal,
                       ARMBuildAttrs::PreserveFPSign);
   else if (checkDenormalAttributeConsistency(*MMI->getModule(),
                                              "denormal-fp-math",
-                                             DenormalMode::getPositiveZero()) ||
-           TM.Options.FPDenormalMode == FPDenormal::PositiveZero)
+                                             DenormalMode::getPositiveZero()))
     ATS.emitAttribute(ARMBuildAttrs::ABI_FP_denormal,
                       ARMBuildAttrs::PositiveZero);
   else if (!TM.Options.UnsafeFPMath)
@@ -896,7 +903,7 @@ void ARMAsmPrinter::emitMachineConstantPoolValue(
 
   MCSymbol *MCSym;
   if (ACPV->isLSDA()) {
-    MCSym = getCurExceptionSym();
+    MCSym = getMBBExceptionSym(MF->front());
   } else if (ACPV->isBlockAddress()) {
     const BlockAddress *BA =
       cast<ARMConstantPoolConstant>(ACPV)->getBlockAddress();
@@ -1087,16 +1094,26 @@ void ARMAsmPrinter::EmitUnwindingInstruction(const MachineInstr *MI) {
   unsigned Opc = MI->getOpcode();
   unsigned SrcReg, DstReg;
 
-  if (Opc == ARM::tPUSH || Opc == ARM::tLDRpci) {
-    // Two special cases:
-    // 1) tPUSH does not have src/dst regs.
-    // 2) for Thumb1 code we sometimes materialize the constant via constpool
-    // load. Yes, this is pretty fragile, but for now I don't see better
-    // way... :(
+  switch (Opc) {
+  case ARM::tPUSH:
+    // special case: tPUSH does not have src/dst regs.
     SrcReg = DstReg = ARM::SP;
-  } else {
+    break;
+  case ARM::tLDRpci:
+  case ARM::t2MOVi16:
+  case ARM::t2MOVTi16:
+    // special cases:
+    // 1) for Thumb1 code we sometimes materialize the constant via constpool
+    //    load.
+    // 2) for Thumb2 execute only code we materialize the constant via
+    //    immediate constants in 2 separate instructions (MOVW/MOVT).
+    SrcReg = ~0U;
+    DstReg = MI->getOperand(0).getReg();
+    break;
+  default:
     SrcReg = MI->getOperand(1).getReg();
     DstReg = MI->getOperand(0).getReg();
+    break;
   }
 
   // Try to figure out the unwinding opcode out of src / dst regs.
@@ -1200,22 +1217,10 @@ void ARMAsmPrinter::EmitUnwindingInstruction(const MachineInstr *MI) {
       case ARM::tADDrSPi:
         Offset = -MI->getOperand(2).getImm()*4;
         break;
-      case ARM::tLDRpci: {
-        // Grab the constpool index and check, whether it corresponds to
-        // original or cloned constpool entry.
-        unsigned CPI = MI->getOperand(1).getIndex();
-        const MachineConstantPool *MCP = MF.getConstantPool();
-        if (CPI >= MCP->getConstants().size())
-          CPI = AFI->getOriginalCPIdx(CPI);
-        assert(CPI != -1U && "Invalid constpool index");
-
-        // Derive the actual offset.
-        const MachineConstantPoolEntry &CPE = MCP->getConstants()[CPI];
-        assert(!CPE.isMachineConstantPoolEntry() && "Invalid constpool entry");
-        // FIXME: Check for user, it should be "add" instruction!
-        Offset = -cast<ConstantInt>(CPE.Val.ConstVal)->getSExtValue();
+      case ARM::tADDhirr:
+        Offset =
+            -AFI->EHPrologueOffsetInRegs.lookup(MI->getOperand(2).getReg());
         break;
-      }
       }
 
       if (MAI->getExceptionHandlingType() == ExceptionHandling::ARM) {
@@ -1236,14 +1241,43 @@ void ARMAsmPrinter::EmitUnwindingInstruction(const MachineInstr *MI) {
     } else if (DstReg == ARM::SP) {
       MI->print(errs());
       llvm_unreachable("Unsupported opcode for unwinding information");
-    } else if (Opc == ARM::tMOVr) {
-      // If a Thumb1 function spills r8-r11, we copy the values to low
-      // registers before pushing them. Record the copy so we can emit the
-      // correct ".save" later.
-      AFI->EHPrologueRemappedRegs[DstReg] = SrcReg;
     } else {
-      MI->print(errs());
-      llvm_unreachable("Unsupported opcode for unwinding information");
+      int64_t Offset = 0;
+      switch (Opc) {
+      case ARM::tMOVr:
+        // If a Thumb1 function spills r8-r11, we copy the values to low
+        // registers before pushing them. Record the copy so we can emit the
+        // correct ".save" later.
+        AFI->EHPrologueRemappedRegs[DstReg] = SrcReg;
+        break;
+      case ARM::tLDRpci: {
+        // Grab the constpool index and check, whether it corresponds to
+        // original or cloned constpool entry.
+        unsigned CPI = MI->getOperand(1).getIndex();
+        const MachineConstantPool *MCP = MF.getConstantPool();
+        if (CPI >= MCP->getConstants().size())
+          CPI = AFI->getOriginalCPIdx(CPI);
+        assert(CPI != -1U && "Invalid constpool index");
+
+        // Derive the actual offset.
+        const MachineConstantPoolEntry &CPE = MCP->getConstants()[CPI];
+        assert(!CPE.isMachineConstantPoolEntry() && "Invalid constpool entry");
+        Offset = cast<ConstantInt>(CPE.Val.ConstVal)->getSExtValue();
+        AFI->EHPrologueOffsetInRegs[DstReg] = Offset;
+        break;
+      }
+      case ARM::t2MOVi16:
+        Offset = MI->getOperand(1).getImm();
+        AFI->EHPrologueOffsetInRegs[DstReg] = Offset;
+        break;
+      case ARM::t2MOVTi16:
+        Offset = MI->getOperand(2).getImm();
+        AFI->EHPrologueOffsetInRegs[DstReg] |= (Offset << 16);
+        break;
+      default:
+        MI->print(errs());
+        llvm_unreachable("Unsupported opcode for unwinding information");
+      }
     }
   }
 }
@@ -1863,7 +1897,7 @@ void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
     // LSJLJEH:
     Register SrcReg = MI->getOperand(0).getReg();
     Register ValReg = MI->getOperand(1).getReg();
-    MCSymbol *Label = OutContext.createTempSymbol("SJLJEH", false, true);
+    MCSymbol *Label = OutContext.createTempSymbol("SJLJEH");
     OutStreamer->AddComment("eh_setjmp begin");
     EmitToStreamer(*OutStreamer, MCInstBuilder(ARM::tMOVr)
       .addReg(ValReg)
@@ -2146,6 +2180,48 @@ void ARMAsmPrinter::emitInstruction(const MachineInstr *MI) {
   case ARM::PATCHABLE_TAIL_CALL:
     LowerPATCHABLE_TAIL_CALL(*MI);
     return;
+  case ARM::SpeculationBarrierISBDSBEndBB: {
+    // Print DSB SYS + ISB
+    MCInst TmpInstDSB;
+    TmpInstDSB.setOpcode(ARM::DSB);
+    TmpInstDSB.addOperand(MCOperand::createImm(0xf));
+    EmitToStreamer(*OutStreamer, TmpInstDSB);
+    MCInst TmpInstISB;
+    TmpInstISB.setOpcode(ARM::ISB);
+    TmpInstISB.addOperand(MCOperand::createImm(0xf));
+    EmitToStreamer(*OutStreamer, TmpInstISB);
+    return;
+  }
+  case ARM::t2SpeculationBarrierISBDSBEndBB: {
+    // Print DSB SYS + ISB
+    MCInst TmpInstDSB;
+    TmpInstDSB.setOpcode(ARM::t2DSB);
+    TmpInstDSB.addOperand(MCOperand::createImm(0xf));
+    TmpInstDSB.addOperand(MCOperand::createImm(ARMCC::AL));
+    TmpInstDSB.addOperand(MCOperand::createReg(0));
+    EmitToStreamer(*OutStreamer, TmpInstDSB);
+    MCInst TmpInstISB;
+    TmpInstISB.setOpcode(ARM::t2ISB);
+    TmpInstISB.addOperand(MCOperand::createImm(0xf));
+    TmpInstISB.addOperand(MCOperand::createImm(ARMCC::AL));
+    TmpInstISB.addOperand(MCOperand::createReg(0));
+    EmitToStreamer(*OutStreamer, TmpInstISB);
+    return;
+  }
+  case ARM::SpeculationBarrierSBEndBB: {
+    // Print SB
+    MCInst TmpInstSB;
+    TmpInstSB.setOpcode(ARM::SB);
+    EmitToStreamer(*OutStreamer, TmpInstSB);
+    return;
+  }
+  case ARM::t2SpeculationBarrierSBEndBB: {
+    // Print SB
+    MCInst TmpInstSB;
+    TmpInstSB.setOpcode(ARM::t2SB);
+    EmitToStreamer(*OutStreamer, TmpInstSB);
+    return;
+  }
   }
 
   MCInst TmpInst;

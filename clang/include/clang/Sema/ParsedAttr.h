@@ -39,6 +39,7 @@ class IdentifierInfo;
 class LangOptions;
 class ParsedAttr;
 class Sema;
+class Stmt;
 class TargetInfo;
 
 struct ParsedAttrInfo {
@@ -63,9 +64,9 @@ struct ParsedAttrInfo {
   /// The syntaxes supported by this attribute and how they're spelled.
   struct Spelling {
     AttributeCommonInfo::Syntax Syntax;
-    std::string NormalizedFullName;
+    const char *NormalizedFullName;
   };
-  std::vector<Spelling> Spellings;
+  ArrayRef<Spelling> Spellings;
 
   ParsedAttrInfo(AttributeCommonInfo::Kind AttrKind =
                      AttributeCommonInfo::NoSemaHandlerAttribute)
@@ -78,6 +79,23 @@ struct ParsedAttrInfo {
   /// Check if this attribute appertains to D, and issue a diagnostic if not.
   virtual bool diagAppertainsToDecl(Sema &S, const ParsedAttr &Attr,
                                     const Decl *D) const {
+    return true;
+  }
+  /// Check if this attribute appertains to St, and issue a diagnostic if not.
+  virtual bool diagAppertainsToStmt(Sema &S, const ParsedAttr &Attr,
+                                    const Stmt *St) const {
+    return true;
+  }
+  /// Check if the given attribute is mutually exclusive with other attributes
+  /// already applied to the given declaration.
+  virtual bool diagMutualExclusion(Sema &S, const ParsedAttr &A,
+                                   const Decl *D) const {
+    return true;
+  }
+  /// Check if the given attribute is mutually exclusive with other attributes
+  /// already applied to the given statement.
+  virtual bool diagMutualExclusion(Sema &S, const ParsedAttr &A,
+                                   const Stmt *St) const {
     return true;
   }
   /// Check if this attribute is allowed by the language we are compiling, and
@@ -573,6 +591,16 @@ public:
     return MacroExpansionLoc;
   }
 
+  /// Check if the attribute has exactly as many args as Num. May output an
+  /// error. Returns false if a diagnostic is produced.
+  bool checkExactlyNumArgs(class Sema &S, unsigned Num) const;
+  /// Check if the attribute has at least as many args as Num. May output an
+  /// error. Returns false if a diagnostic is produced.
+  bool checkAtLeastNumArgs(class Sema &S, unsigned Num) const;
+  /// Check if the attribute has at most as many args as Num. May output an
+  /// error. Returns false if a diagnostic is produced.
+  bool checkAtMostNumArgs(class Sema &S, unsigned Num) const;
+
   bool isTargetSpecificAttr() const;
   bool isTypeAttr() const;
   bool isStmtAttr() const;
@@ -582,6 +610,9 @@ public:
   unsigned getMaxArgs() const;
   bool hasVariadicArg() const;
   bool diagnoseAppertainsTo(class Sema &S, const Decl *D) const;
+  bool diagnoseAppertainsTo(class Sema &S, const Stmt *St) const;
+  bool diagnoseMutualExclusion(class Sema &S, const Decl *D) const;
+  bool diagnoseMutualExclusion(class Sema &S, const Stmt *St) const;
   bool appliesToDecl(const Decl *D, attr::SubjectMatchRule MatchRule) const;
   void getMatchRules(const LangOptions &LangOpts,
                      SmallVectorImpl<std::pair<attr::SubjectMatchRule, bool>>
@@ -606,6 +637,10 @@ public:
       return LangAS::opencl_constant;
     case ParsedAttr::AT_OpenCLGlobalAddressSpace:
       return LangAS::opencl_global;
+    case ParsedAttr::AT_OpenCLGlobalDeviceAddressSpace:
+      return LangAS::opencl_global_device;
+    case ParsedAttr::AT_OpenCLGlobalHostAddressSpace:
+      return LangAS::opencl_global_host;
     case ParsedAttr::AT_OpenCLLocalAddressSpace:
       return LangAS::opencl_local;
     case ParsedAttr::AT_OpenCLPrivateAddressSpace:
@@ -1013,13 +1048,35 @@ private:
   mutable AttributePool pool;
 };
 
+struct ParsedAttributesWithRange : ParsedAttributes {
+  ParsedAttributesWithRange(AttributeFactory &factory)
+      : ParsedAttributes(factory) {}
+
+  void clear() {
+    ParsedAttributes::clear();
+    Range = SourceRange();
+  }
+
+  SourceRange Range;
+};
+struct ParsedAttributesViewWithRange : ParsedAttributesView {
+  ParsedAttributesViewWithRange() : ParsedAttributesView() {}
+  void clearListOnly() {
+    ParsedAttributesView::clearListOnly();
+    Range = SourceRange();
+  }
+
+  SourceRange Range;
+};
+
 /// These constants match the enumerated choices of
 /// err_attribute_argument_n_type and err_attribute_argument_type.
 enum AttributeArgumentNType {
   AANT_ArgumentIntOrBool,
   AANT_ArgumentIntegerConstant,
   AANT_ArgumentString,
-  AANT_ArgumentIdentifier
+  AANT_ArgumentIdentifier,
+  AANT_ArgumentConstantExpr,
 };
 
 /// These constants match the enumerated choices of
@@ -1040,32 +1097,43 @@ enum AttributeDeclKind {
   ExpectedFunctionWithProtoType,
 };
 
-inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
-                                           const ParsedAttr &At) {
+inline const StreamingDiagnostic &operator<<(const StreamingDiagnostic &DB,
+                                             const ParsedAttr &At) {
   DB.AddTaggedVal(reinterpret_cast<intptr_t>(At.getAttrName()),
                   DiagnosticsEngine::ak_identifierinfo);
   return DB;
 }
 
-inline const PartialDiagnostic &operator<<(const PartialDiagnostic &PD,
-                                           const ParsedAttr &At) {
-  PD.AddTaggedVal(reinterpret_cast<intptr_t>(At.getAttrName()),
-                  DiagnosticsEngine::ak_identifierinfo);
-  return PD;
-}
-
-inline const DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB,
-                                           const ParsedAttr *At) {
+inline const StreamingDiagnostic &operator<<(const StreamingDiagnostic &DB,
+                                             const ParsedAttr *At) {
   DB.AddTaggedVal(reinterpret_cast<intptr_t>(At->getAttrName()),
                   DiagnosticsEngine::ak_identifierinfo);
   return DB;
 }
 
-inline const PartialDiagnostic &operator<<(const PartialDiagnostic &PD,
-                                           const ParsedAttr *At) {
-  PD.AddTaggedVal(reinterpret_cast<intptr_t>(At->getAttrName()),
+/// AttributeCommonInfo has a non-explicit constructor which takes an
+/// SourceRange as its only argument, this constructor has many uses so making
+/// it explicit is hard. This constructor causes ambiguity with
+/// DiagnosticBuilder &operator<<(const DiagnosticBuilder &DB, SourceRange R).
+/// We use SFINAE to disable any conversion and remove any ambiguity.
+template <typename ACI,
+          typename std::enable_if_t<
+              std::is_same<ACI, AttributeCommonInfo>::value, int> = 0>
+inline const StreamingDiagnostic &operator<<(const StreamingDiagnostic &DB,
+                                           const ACI &CI) {
+  DB.AddTaggedVal(reinterpret_cast<intptr_t>(CI.getAttrName()),
                   DiagnosticsEngine::ak_identifierinfo);
-  return PD;
+  return DB;
+}
+
+template <typename ACI,
+          typename std::enable_if_t<
+              std::is_same<ACI, AttributeCommonInfo>::value, int> = 0>
+inline const StreamingDiagnostic &operator<<(const StreamingDiagnostic &DB,
+                                           const ACI* CI) {
+  DB.AddTaggedVal(reinterpret_cast<intptr_t>(CI->getAttrName()),
+                  DiagnosticsEngine::ak_identifierinfo);
+  return DB;
 }
 
 } // namespace clang

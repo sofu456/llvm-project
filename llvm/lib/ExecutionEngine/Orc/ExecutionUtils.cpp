@@ -13,37 +13,13 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Object/MachOUniversal.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/TargetRegistry.h"
 #include "llvm/Target/TargetMachine.h"
 
 namespace llvm {
 namespace orc {
-
-int runAsMain(int (*Main)(int, char *[]), ArrayRef<std::string> Args,
-              Optional<StringRef> ProgramName) {
-  std::vector<std::unique_ptr<char[]>> ArgVStorage;
-  std::vector<char *> ArgV;
-
-  ArgVStorage.reserve(Args.size() + (ProgramName ? 1 : 0));
-  ArgV.reserve(Args.size() + 1 + (ProgramName ? 1 : 0));
-
-  if (ProgramName) {
-    ArgVStorage.push_back(std::make_unique<char[]>(ProgramName->size() + 1));
-    llvm::copy(*ProgramName, &ArgVStorage.back()[0]);
-    ArgVStorage.back()[ProgramName->size()] = '\0';
-    ArgV.push_back(ArgVStorage.back().get());
-  }
-
-  for (auto &Arg : Args) {
-    ArgVStorage.push_back(std::make_unique<char[]>(Arg.size() + 1));
-    llvm::copy(Arg, &ArgVStorage.back()[0]);
-    ArgVStorage.back()[Arg.size()] = '\0';
-    ArgV.push_back(ArgVStorage.back().get());
-  }
-  ArgV.push_back(nullptr);
-
-  return Main(Args.size() + !!ProgramName, ArgV.data());
-}
 
 CtorDtorIterator::CtorDtorIterator(const GlobalVariable *GV, bool End)
   : InitList(
@@ -259,8 +235,8 @@ DynamicLibrarySearchGenerator::Load(const char *FileName, char GlobalPrefix,
 }
 
 Error DynamicLibrarySearchGenerator::tryToGenerate(
-    LookupKind K, JITDylib &JD, JITDylibLookupFlags JDLookupFlags,
-    const SymbolLookupSet &Symbols) {
+    LookupState &LS, LookupKind K, JITDylib &JD,
+    JITDylibLookupFlags JDLookupFlags, const SymbolLookupSet &Symbols) {
   orc::SymbolMap NewSymbols;
 
   bool HasGlobalPrefix = (GlobalPrefix != '\0');
@@ -303,6 +279,52 @@ StaticLibraryDefinitionGenerator::Load(ObjectLayer &L, const char *FileName) {
 }
 
 Expected<std::unique_ptr<StaticLibraryDefinitionGenerator>>
+StaticLibraryDefinitionGenerator::Load(ObjectLayer &L, const char *FileName,
+                                       const Triple &TT) {
+  auto B = object::createBinary(FileName);
+  if (!B)
+    return B.takeError();
+
+  // If this is a regular archive then create an instance from it.
+  if (isa<object::Archive>(B->getBinary()))
+    return Create(L, std::move(B->takeBinary().second));
+
+  // If this is a universal binary then search for a slice matching the given
+  // Triple.
+  if (auto *UB = cast<object::MachOUniversalBinary>(B->getBinary())) {
+    for (const auto &Obj : UB->objects()) {
+      auto ObjTT = Obj.getTriple();
+      if (ObjTT.getArch() == TT.getArch() &&
+          ObjTT.getSubArch() == TT.getSubArch() &&
+          (TT.getVendor() == Triple::UnknownVendor ||
+           ObjTT.getVendor() == TT.getVendor())) {
+        // We found a match. Create an instance from a buffer covering this
+        // slice.
+        auto SliceBuffer = MemoryBuffer::getFileSlice(FileName, Obj.getSize(),
+                                                      Obj.getOffset());
+        if (!SliceBuffer)
+          return make_error<StringError>(
+              Twine("Could not create buffer for ") + TT.str() + " slice of " +
+                  FileName + ": [ " + formatv("{0:x}", Obj.getOffset()) +
+                  " .. " + formatv("{0:x}", Obj.getOffset() + Obj.getSize()) +
+                  ": " + SliceBuffer.getError().message(),
+              SliceBuffer.getError());
+        return Create(L, std::move(*SliceBuffer));
+      }
+    }
+
+    return make_error<StringError>(Twine("Universal binary ") + FileName +
+                                       " does not contain a slice for " +
+                                       TT.str(),
+                                   inconvertibleErrorCode());
+  }
+
+  return make_error<StringError>(Twine("Unrecognized file type for ") +
+                                     FileName,
+                                 inconvertibleErrorCode());
+}
+
+Expected<std::unique_ptr<StaticLibraryDefinitionGenerator>>
 StaticLibraryDefinitionGenerator::Create(
     ObjectLayer &L, std::unique_ptr<MemoryBuffer> ArchiveBuffer) {
   Error Err = Error::success();
@@ -317,8 +339,8 @@ StaticLibraryDefinitionGenerator::Create(
 }
 
 Error StaticLibraryDefinitionGenerator::tryToGenerate(
-    LookupKind K, JITDylib &JD, JITDylibLookupFlags JDLookupFlags,
-    const SymbolLookupSet &Symbols) {
+    LookupState &LS, LookupKind K, JITDylib &JD,
+    JITDylibLookupFlags JDLookupFlags, const SymbolLookupSet &Symbols) {
 
   // Don't materialize symbols from static archives unless this is a static
   // lookup.
@@ -349,8 +371,7 @@ Error StaticLibraryDefinitionGenerator::tryToGenerate(
     MemoryBufferRef ChildBufferRef(ChildBufferInfo.first,
                                    ChildBufferInfo.second);
 
-    if (auto Err =
-            L.add(JD, MemoryBuffer::getMemBuffer(ChildBufferRef), VModuleKey()))
+    if (auto Err = L.add(JD, MemoryBuffer::getMemBuffer(ChildBufferRef, false)))
       return Err;
   }
 

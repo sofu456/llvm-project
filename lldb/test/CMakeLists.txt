@@ -1,6 +1,16 @@
 # Test runner infrastructure for LLDB. This configures the LLDB test trees
 # for use by Lit, and delegates to LLVM's lit test handlers.
 
+if(LLDB_BUILT_STANDALONE)
+  # In order to run check-lldb-* we need the correct map_config directives in
+  # llvm-lit. Because this is a standalone build, LLVM doesn't know about LLDB,
+  # and the lldb mappings are missing. We build our own llvm-lit, and tell LLVM
+  # to use the llvm-lit in the lldb build directory.
+  if (EXISTS ${LLVM_MAIN_SRC_DIR}/utils/llvm-lit)
+    set(LLVM_EXTERNAL_LIT ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/llvm-lit)
+  endif()
+endif()
+
 # Configure the build directory.
 set(LLDB_TEST_BUILD_DIRECTORY "${PROJECT_BINARY_DIR}/lldb-test-build.noindex" CACHE PATH "The build root for building tests.")
 
@@ -39,6 +49,9 @@ if (CMAKE_SYSTEM_NAME MATCHES "Darwin")
   add_lldb_test_dependency(darwin-debug)
 endif()
 
+if(TARGET debugserver)
+  add_lldb_test_dependency(debugserver)
+endif()
 if(TARGET lldb-server)
   add_lldb_test_dependency(lldb-server)
 endif()
@@ -67,6 +80,7 @@ if(NOT LLDB_BUILT_STANDALONE)
     dsymutil
     llvm-strip
     not
+    split-file
     yaml2obj
   )
 endif()
@@ -95,7 +109,7 @@ if(TARGET clang)
     else()
       # We require libcxx for the test suite, so if we aren't building it,
       # try to provide a helpful error about how to resolve the situation.
-      if(NOT TARGET cxx)
+      if(NOT TARGET cxx AND NOT libcxx IN_LIST LLVM_ENABLE_RUNTIMES)
         if(LLVM_ENABLE_PROJECTS STREQUAL "")
           # If `LLVM_ENABLE_PROJECTS` is not being used (implying that we are
           # using the old layout), suggest checking it out.
@@ -107,8 +121,9 @@ if(TARGET clang)
           # If `LLVM_ENABLE_PROJECTS` is being used, suggest adding it.
           message(FATAL_ERROR
             "LLDB test suite requires libc++, but it is currently disabled. "
-            "Please add `libcxx` to `LLVM_ENABLE_PROJECTS` or disable tests "
-            "via `LLDB_INCLUDE_TESTS=OFF`.")
+            "Please add `libcxx` to `LLVM_ENABLE_PROJECTS` or "
+            "`LLVM_ENABLE_RUNTIMES`, or disable tests via "
+            "`LLDB_INCLUDE_TESTS=OFF`.")
         endif()
       endif()
       add_lldb_test_dependency(cxx)
@@ -130,6 +145,7 @@ add_lldb_test_dependency(
   llvm-nm
   llvm-mc
   llvm-objcopy
+  llvm-pdbutil
   llvm-readobj
   )
 
@@ -148,11 +164,13 @@ endif()
 
 # These values are not canonicalized within LLVM.
 llvm_canonicalize_cmake_booleans(
+  LLDB_BUILD_INTEL_PT
   LLDB_ENABLE_PYTHON
   LLDB_ENABLE_LUA
   LLDB_ENABLE_LZMA
   LLVM_ENABLE_ZLIB
   LLVM_ENABLE_SHARED_LIBS
+  LLDB_USE_SYSTEM_DEBUGSERVER
   LLDB_IS_64_BITS)
 
 # Configure the individual test suites.
@@ -167,16 +185,41 @@ configure_lit_site_cfg(
   MAIN_CONFIG
   ${CMAKE_CURRENT_SOURCE_DIR}/lit.cfg.py)
 
-add_lit_testsuites(LLDB
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  DEPENDS lldb-test-deps)
-
-add_lit_testsuite(check-lldb-lit "Running lldb lit test suite"
+add_lit_testsuite(check-lldb "Running lldb lit test suite"
   ${CMAKE_CURRENT_BINARY_DIR}
-  DEPENDS lldb-test-deps)
-set_target_properties(check-lldb-lit PROPERTIES FOLDER "lldb tests")
+  DEPENDS
+    lldb-api-test-deps
+    lldb-shell-test-deps
+    lldb-unit-test-deps)
+set_target_properties(check-lldb PROPERTIES FOLDER "lldb tests")
 
-add_custom_target(check-lldb)
-add_dependencies(check-lldb lldb-test-deps)
-set_target_properties(check-lldb PROPERTIES FOLDER "lldb misc")
-add_dependencies(check-lldb check-lldb-lit)
+# Add a lit test suite that runs the API & shell test while capturing a
+# reproducer.
+add_lit_testsuite(check-lldb-reproducers-capture
+  "Running lldb test suite with reproducer capture"
+  ${CMAKE_CURRENT_BINARY_DIR}/API
+  ${CMAKE_CURRENT_BINARY_DIR}/Shell
+  PARAMS "lldb-run-with-repro=capture"
+  EXCLUDE_FROM_CHECK_ALL
+  DEPENDS lldb-test-deps)
+
+# Add a lit test suite that runs the API & shell test by replaying a
+# reproducer.
+add_lit_testsuite(check-lldb-reproducers
+  "Running lldb test suite with reproducer replay"
+  ${CMAKE_CURRENT_BINARY_DIR}/API
+  ${CMAKE_CURRENT_BINARY_DIR}/Shell
+  PARAMS "lldb-run-with-repro=replay"
+  EXCLUDE_FROM_CHECK_ALL
+  DEPENDS lldb-test-deps)
+add_dependencies(check-lldb-reproducers check-lldb-reproducers-capture)
+
+if(LLDB_BUILT_STANDALONE)
+  # This has to happen *AFTER* add_lit_testsuite.
+  if (EXISTS ${LLVM_MAIN_SRC_DIR}/utils/llvm-lit)
+    # LLVM's make_paths_relative uses Python3_EXECUTABLE which isn't set in a
+    # standalone LLDB build.
+    set(Python3_EXECUTABLE ${Python3_EXECUTABLE})
+    add_subdirectory(${LLVM_MAIN_SRC_DIR}/utils/llvm-lit ${CMAKE_CURRENT_BINARY_DIR}/llvm-lit)
+  endif()
+endif()

@@ -68,6 +68,22 @@ LLVMContext::LLVMContext() : pImpl(new LLVMContextImpl(*this)) {
          "cfguardtarget operand bundle id drifted!");
   (void)CFGuardTargetEntry;
 
+  auto *PreallocatedEntry = pImpl->getOrInsertBundleTag("preallocated");
+  assert(PreallocatedEntry->second == LLVMContext::OB_preallocated &&
+         "preallocated operand bundle id drifted!");
+  (void)PreallocatedEntry;
+
+  auto *GCLiveEntry = pImpl->getOrInsertBundleTag("gc-live");
+  assert(GCLiveEntry->second == LLVMContext::OB_gc_live &&
+         "gc-transition operand bundle id drifted!");
+  (void)GCLiveEntry;
+
+  auto *ClangAttachedCall =
+      pImpl->getOrInsertBundleTag("clang.arc.attachedcall");
+  assert(ClangAttachedCall->second == LLVMContext::OB_clang_arc_attachedcall &&
+         "clang.arc.attachedcall operand bundle id drifted!");
+  (void)ClangAttachedCall;
+
   SyncScope::ID SingleThreadSSID =
       pImpl->getOrInsertSyncScopeID("singlethread");
   assert(SingleThreadSSID == SyncScope::SingleThread &&
@@ -95,26 +111,6 @@ void LLVMContext::removeModule(Module *M) {
 // Recoverable Backend Errors
 //===----------------------------------------------------------------------===//
 
-void LLVMContext::
-setInlineAsmDiagnosticHandler(InlineAsmDiagHandlerTy DiagHandler,
-                              void *DiagContext) {
-  pImpl->InlineAsmDiagHandler = DiagHandler;
-  pImpl->InlineAsmDiagContext = DiagContext;
-}
-
-/// getInlineAsmDiagnosticHandler - Return the diagnostic handler set by
-/// setInlineAsmDiagnosticHandler.
-LLVMContext::InlineAsmDiagHandlerTy
-LLVMContext::getInlineAsmDiagnosticHandler() const {
-  return pImpl->InlineAsmDiagHandler;
-}
-
-/// getInlineAsmDiagnosticContext - Return the diagnostic context set by
-/// setInlineAsmDiagnosticHandler.
-void *LLVMContext::getInlineAsmDiagnosticContext() const {
-  return pImpl->InlineAsmDiagContext;
-}
-
 void LLVMContext::setDiagnosticHandlerCallBack(
     DiagnosticHandler::DiagnosticHandlerTy DiagnosticHandler,
     void *DiagnosticContext, bool RespectFilters) {
@@ -136,11 +132,16 @@ bool LLVMContext::getDiagnosticsHotnessRequested() const {
   return pImpl->DiagnosticsHotnessRequested;
 }
 
-void LLVMContext::setDiagnosticsHotnessThreshold(uint64_t Threshold) {
+void LLVMContext::setDiagnosticsHotnessThreshold(Optional<uint64_t> Threshold) {
   pImpl->DiagnosticsHotnessThreshold = Threshold;
 }
+
 uint64_t LLVMContext::getDiagnosticsHotnessThreshold() const {
-  return pImpl->DiagnosticsHotnessThreshold;
+  return pImpl->DiagnosticsHotnessThreshold.getValueOr(UINT64_MAX);
+}
+
+bool LLVMContext::isDiagnosticsHotnessThresholdSetFromPSI() const {
+  return !pImpl->DiagnosticsHotnessThreshold.hasValue();
 }
 
 remarks::RemarkStreamer *LLVMContext::getMainRemarkStreamer() {
@@ -275,6 +276,11 @@ void LLVMContext::getMDKindNames(SmallVectorImpl<StringRef> &Names) const {
 
 void LLVMContext::getOperandBundleTags(SmallVectorImpl<StringRef> &Tags) const {
   pImpl->getOperandBundleTags(Tags);
+}
+
+StringMapEntry<uint32_t> *
+LLVMContext::getOrInsertBundleTag(StringRef TagName) const {
+  return pImpl->getOrInsertBundleTag(TagName);
 }
 
 uint32_t LLVMContext::getOperandBundleTagID(StringRef Tag) const {

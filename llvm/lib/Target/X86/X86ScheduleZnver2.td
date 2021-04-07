@@ -370,8 +370,10 @@ defm : X86WriteRes<WriteVecStoreX,       [Zn2AGU], 1, [1], 1>;
 defm : X86WriteRes<WriteVecStoreY,       [Zn2AGU], 1, [1], 1>;
 defm : X86WriteRes<WriteVecStoreNT,      [Zn2AGU], 1, [1], 1>;
 defm : X86WriteRes<WriteVecStoreNTY,     [Zn2AGU], 1, [1], 1>;
-defm : X86WriteRes<WriteVecMaskedStore,  [Zn2AGU,Zn2FPU01], 4, [1,1], 1>;
-defm : X86WriteRes<WriteVecMaskedStoreY, [Zn2AGU,Zn2FPU01], 5, [1,1], 2>;
+defm : X86WriteRes<WriteVecMaskedStore32,  [Zn2AGU,Zn2FPU01], 4, [1,1], 1>;
+defm : X86WriteRes<WriteVecMaskedStore32Y, [Zn2AGU,Zn2FPU01], 5, [1,2], 2>;
+defm : X86WriteRes<WriteVecMaskedStore64,  [Zn2AGU,Zn2FPU01], 4, [1,1], 1>;
+defm : X86WriteRes<WriteVecMaskedStore64Y, [Zn2AGU,Zn2FPU01], 5, [1,2], 2>;
 defm : X86WriteRes<WriteVecMove,         [Zn2FPU], 1, [1], 1>;
 defm : X86WriteRes<WriteVecMoveX,        [Zn2FPU], 1, [1], 1>;
 defm : X86WriteRes<WriteVecMoveY,        [Zn2FPU], 2, [1], 2>;
@@ -417,6 +419,7 @@ defm : Zn2WriteResFpuPair<WriteBlend,      [Zn2FPU01], 1>;
 defm : Zn2WriteResFpuPair<WriteBlendY,     [Zn2FPU01], 1>;
 defm : X86WriteResPairUnsupported<WriteBlendZ>;
 defm : Zn2WriteResFpuPair<WriteShuffle256, [Zn2FPU],   2>;
+defm : Zn2WriteResFpuPair<WriteVPMOV256,   [Zn2FPU12],  4, [1], 2, 4>;
 defm : Zn2WriteResFpuPair<WriteVarShuffle256, [Zn2FPU],   2>;
 defm : Zn2WriteResFpuPair<WritePSADBW,     [Zn2FPU0],  3>;
 defm : Zn2WriteResFpuPair<WritePSADBWX,    [Zn2FPU0],  3>;
@@ -1026,11 +1029,6 @@ def : InstRW<[Zn2WriteFPU12], (instrs MMX_PACKSSDWirr,
 def : InstRW<[Zn2WriteFPU12m], (instrs MMX_PACKSSDWirm,
                                       MMX_PACKSSWBirm,
                                       MMX_PACKUSWBirm)>;
-
-// VPMOVSX/ZX BW BD BQ WD WQ DQ.
-// y <- x.
-def : InstRW<[Zn2WriteFPU12Y], (instregex "VPMOV(SX|ZX)(BW|BD|BQ|WD|WQ|DQ)Yrr")>;
-def : InstRW<[Zn2WriteFPU12Ym], (instregex "VPMOV(SX|ZX)(BW|BD|BQ|WD|WQ|DQ)Yrm")>;
 
 def Zn2WriteFPU013 : SchedWriteRes<[Zn2FPU013]> ;
 def Zn2WriteFPU013Y : SchedWriteRes<[Zn2FPU013]> ;

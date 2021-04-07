@@ -57,7 +57,6 @@ public:
 /// GCMetadata record for each function.
 class GCMachineCodeAnalysis : public MachineFunctionPass {
   GCFunctionInfo *FI;
-  MachineModuleInfo *MMI;
   const TargetInstrInfo *TII;
 
   void FindSafePoints(MachineFunction &MF);
@@ -106,9 +105,9 @@ void LowerIntrinsics::getAnalysisUsage(AnalysisUsage &AU) const {
 bool LowerIntrinsics::doInitialization(Module &M) {
   GCModuleInfo *MI = getAnalysisIfAvailable<GCModuleInfo>();
   assert(MI && "LowerIntrinsics didn't require GCModuleInfo!?");
-  for (Module::iterator I = M.begin(), E = M.end(); I != E; ++I)
-    if (!I->isDeclaration() && I->hasGC())
-      MI->getFunctionInfo(*I); // Instantiate the GC strategy.
+  for (Function &F : M)
+    if (!F.isDeclaration() && F.hasGC())
+      MI->getFunctionInfo(F); // Instantiate the GC strategy.
 
   return false;
 }
@@ -160,10 +159,9 @@ static bool InsertRootInitializers(Function &F, ArrayRef<AllocaInst *> Roots) {
 
   for (AllocaInst *Root : Roots)
     if (!InitedRoots.count(Root)) {
-      StoreInst *SI = new StoreInst(
+      new StoreInst(
           ConstantPointerNull::get(cast<PointerType>(Root->getAllocatedType())),
-          Root);
-      SI->insertAfter(Root);
+          Root, Root->getNextNode());
       MadeChange = true;
     }
 
@@ -250,7 +248,6 @@ GCMachineCodeAnalysis::GCMachineCodeAnalysis() : MachineFunctionPass(ID) {}
 void GCMachineCodeAnalysis::getAnalysisUsage(AnalysisUsage &AU) const {
   MachineFunctionPass::getAnalysisUsage(AU);
   AU.setPreservesAll();
-  AU.addRequired<MachineModuleInfoWrapperPass>();
   AU.addRequired<GCModuleInfo>();
 }
 
@@ -297,9 +294,12 @@ void GCMachineCodeAnalysis::FindStackOffsets(MachineFunction &MF) {
     if (MF.getFrameInfo().isDeadObjectIndex(RI->Num)) {
       RI = FI->removeStackRoot(RI);
     } else {
-      unsigned FrameReg; // FIXME: surely GCRoot ought to store the
+      Register FrameReg; // FIXME: surely GCRoot ought to store the
                          // register that the offset is from?
-      RI->StackOffset = TFI->getFrameIndexReference(MF, RI->Num, FrameReg);
+      auto FrameOffset = TFI->getFrameIndexReference(MF, RI->Num, FrameReg);
+      assert(!FrameOffset.getScalable() &&
+             "Frame offsets with a scalable component are not supported");
+      RI->StackOffset = FrameOffset.getFixed();
       ++RI;
     }
   }
@@ -311,15 +311,14 @@ bool GCMachineCodeAnalysis::runOnMachineFunction(MachineFunction &MF) {
     return false;
 
   FI = &getAnalysis<GCModuleInfo>().getFunctionInfo(MF.getFunction());
-  MMI = &getAnalysis<MachineModuleInfoWrapperPass>().getMMI();
   TII = MF.getSubtarget().getInstrInfo();
 
   // Find the size of the stack frame.  There may be no correct static frame
   // size, we use UINT64_MAX to represent this.
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   const TargetRegisterInfo *RegInfo = MF.getSubtarget().getRegisterInfo();
-  const bool DynamicFrameSize = MFI.hasVarSizedObjects() ||
-    RegInfo->needsStackRealignment(MF);
+  const bool DynamicFrameSize =
+      MFI.hasVarSizedObjects() || RegInfo->hasStackRealignment(MF);
   FI->setFrameSize(DynamicFrameSize ? UINT64_MAX : MFI.getStackSize());
 
   // Find all safe points.

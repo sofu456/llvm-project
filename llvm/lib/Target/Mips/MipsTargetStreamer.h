@@ -19,7 +19,7 @@
 
 namespace llvm {
 
-struct MipsABIFlagsSection;
+class formatted_raw_ostream;
 
 class MipsTargetStreamer : public MCTargetStreamer {
 public:

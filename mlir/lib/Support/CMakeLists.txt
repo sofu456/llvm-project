@@ -1,23 +1,22 @@
 set(LLVM_OPTIONAL_SOURCES
+  DebugCounter.cpp
   FileUtilities.cpp
-  JitRunner.cpp
+  IndentedOstream.cpp
   MlirOptMain.cpp
   StorageUniquer.cpp
   ToolUtilities.cpp
-  TranslateClParser.cpp
 )
 
 add_mlir_library(MLIRSupport
+  DebugCounter.cpp
   FileUtilities.cpp
   StorageUniquer.cpp
   ToolUtilities.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Support
-  )
-target_link_libraries(MLIRSupport
-  PUBLIC
-  LLVMSupport
+
+  LINK_LIBS PUBLIC
   ${LLVM_PTHREAD_LIB})
 
 add_mlir_library(MLIROptLib
@@ -25,41 +24,20 @@ add_mlir_library(MLIROptLib
 
   ADDITIONAL_HEADER_DIRS
   ${MLIR_MAIN_INCLUDE_DIR}/mlir/Support
-  )
-target_link_libraries(MLIROptLib
-  PUBLIC
+
+  LINK_LIBS PUBLIC
   MLIRPass
   MLIRParser
-  LLVMSupport
   MLIRSupport
   )
 
-add_mlir_library(MLIRTranslateClParser
-  TranslateClParser.cpp
+# This doesn't use add_mlir_library as it is used in mlir-tblgen and else
+# mlir-tblgen ends up depending on mlir-generic-headers.
+add_llvm_library(MLIRSupportIndentedOstream
+  IndentedOstream.cpp
 
-  ADDITIONAL_HEADER_DIRS
-  ${MLIR_MAIN_INCLUDE_DIR}/mlir/Support
+  DISABLE_LLVM_LINK_LLVM_DYLIB
+
+  LINK_COMPONENTS
+  Support
   )
-target_link_libraries(MLIRTranslateClParser
-  PUBLIC
-  LLVMSupport
-  MLIRIR
-  MLIRTranslation
-  MLIRParser)
-
-add_llvm_library(MLIRJitRunner
-  JitRunner.cpp
-)
-target_link_libraries(MLIRJitRunner
-  PUBLIC
-  MLIRExecutionEngine
-  MLIRIR
-  MLIRParser
-  MLIRStandardOps
-  MLIRTargetLLVMIR
-  MLIRTransforms
-  MLIRStandardToLLVM
-  MLIRSupport
-  LLVMCore
-  LLVMSupport
-)

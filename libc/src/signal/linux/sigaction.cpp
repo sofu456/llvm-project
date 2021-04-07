@@ -1,4 +1,4 @@
-//===----------------- Linux implementation of sigaction ------------------===//
+//===-- Linux implementation of sigaction ---------------------------------===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -28,9 +28,9 @@ static void copySigaction(T &dest, const V &source) {
   dest.sa_restorer = source.sa_restorer;
 }
 
-int LLVM_LIBC_ENTRYPOINT(sigaction)(
-    int signal, const struct __sigaction *__restrict libc_new,
-    struct __sigaction *__restrict libc_old) {
+LLVM_LIBC_FUNCTION(int, sigaction,
+                   (int signal, const struct __sigaction *__restrict libc_new,
+                    struct __sigaction *__restrict libc_old)) {
   struct sigaction kernel_new;
   if (libc_new) {
     copySigaction(kernel_new, *libc_new);
